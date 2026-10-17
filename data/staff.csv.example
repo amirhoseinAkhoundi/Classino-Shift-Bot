@@ -1,0 +1,5 @@
+name,phone,role,supervisor
+مثال_مدیر,9120000001,bot_manager,
+مثال_مسئول,9120000002,shift_manager,
+مثال_سرپرست,9120000003,supervisor,
+مثال_ادمین,9120000004,admin,مثال_سرپرست

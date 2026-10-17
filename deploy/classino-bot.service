@@ -1,0 +1,14 @@
+[Unit]
+Description=Classino Shift Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=classino
+WorkingDirectory=/opt/classino-bot
+ExecStart=/opt/classino-bot/venv/bin/python bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
