@@ -1,6 +1,9 @@
 """ربات شیفت کلاسینو — نقطه‌ی ورود."""
 import logging
-import os
+import os, shutil
+os.makedirs("/data", exist_ok=True)
+if not os.path.exists("/data/staff.csv"):
+    shutil.copy("seed/staff.csv", "/data/staff.csv")
 
 import app  # noqa: F401  (لاگ، پروکسی و نمونه‌ی بات)
 import config
