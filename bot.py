@@ -1,9 +1,12 @@
 """ربات شیفت کلاسینو — نقطه‌ی ورود."""
 import logging
-import os, shutil
-os.makedirs("/data", exist_ok=True)
-if not os.path.exists("/data/staff.csv"):
-    shutil.copy("seed/staff.csv", "/data/staff.csv")
+import os, io, csv, sqlite3
+
+OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))  # آیدی عددی مالک
+DB_PATH = "/data/bot.db"  # باید داخل ولوم باشه
+
+def is_owner(user_id):
+    return user_id == OWNER_ID
 
 import app  # noqa: F401  (لاگ، پروکسی و نمونه‌ی بات)
 import config
