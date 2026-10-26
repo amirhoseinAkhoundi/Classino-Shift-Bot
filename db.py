@@ -265,14 +265,7 @@ def get_staff_by_name(name):
 def bind_telegram(staff_id, tid):
     with connect() as c:
         c.execute("UPDATE staff SET telegram_id=?, verified_at=CURRENT_TIMESTAMP WHERE id=?", (tid, staff_id))
-def ensure_owner(tid, name="مدیر ربات"):
-    """مالک را بدون CSV و بدون احراز شماره، به‌عنوان bot_manager ثبت می‌کند."""
-    with connect() as c:
-        if c.execute("SELECT 1 FROM staff WHERE telegram_id=?", (tid,)).fetchone():
-            return
-        c.execute(
-            "INSERT INTO staff(name, phone, role, telegram_id, verified_at) "
-            "VALUES(?, NULL, 'bot_manager', ?, CURRENT_TIMESTAMP)", (name, tid))
+
 
 # ---------- schedule ----------
 def sheet_week_start(chat_id, message_id, day):
