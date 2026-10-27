@@ -35,7 +35,7 @@ def teacher_phone_list():
 
     for teacher in assignments:
         name = escape(teacher["teacher"])
-        phone = escape("0" + teacher["phone"])
+        phone = teacher["phone"]
 
         lines.append(f"• {name}: {phone}")
 
