@@ -438,6 +438,14 @@ def active_sheets():
         ).fetchall()
     return [dict(row) for row in rows if row["entry_count"]]
 
+def deactivate_sheet(sheet_id):
+    """غیرفعال کردن یک روز از برنامه بدون حذف سوابق تاریخی."""
+    with connect() as c:
+        result = c.execute(
+            "UPDATE sheets SET active=0 WHERE id=? AND active=1",
+            (sheet_id,),
+        )
+        return result.rowcount > 0
 
 def entries_for_sheet(sheet_id):
     with connect() as c:
