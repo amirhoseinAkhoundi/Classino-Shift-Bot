@@ -49,13 +49,26 @@ def _parse_date(text):
 def _schedule_date_keyboard():
     keyboard = types.InlineKeyboardMarkup()
     sheets = db.active_sheets()
-    for sheet in sheets:
-        jalali_date = jalali_day_month(sheet["scheduled_date"]) if sheet["scheduled_date"] else "بدون تاریخ"
-        keyboard.row(types.InlineKeyboardButton(
-            f"{sheet['day']} {jalali_date} — {sheet['entry_count']} ردیف",
-            callback_data=f"shiftdate:sheet:{sheet['id']}"))
-    return keyboard, sheets
 
+    for sheet in sheets:
+        jalali_date = (
+            jalali_day_month(sheet["scheduled_date"])
+            if sheet["scheduled_date"] else "بدون تاریخ"
+        )
+
+        keyboard.row(
+            types.InlineKeyboardButton(
+                f"📅 {sheet['day']} {jalali_date} — "
+                f"{sheet['entry_count']} ردیف",
+                callback_data=f"shiftdate:sheet:{sheet['id']}"
+            ),
+            types.InlineKeyboardButton(
+                "🗑 حذف",
+                callback_data=f"shiftdelete:ask:{sheet['id']}"
+            ),
+        )
+
+    return keyboard, sheets
 
 @bot.message_handler(func=lambda m: m.text == BTN_SCHEDULE_DATES, chat_types=["private"])
 def schedule_date_panel(m):
