@@ -81,6 +81,146 @@ def schedule_date_panel(m):
         return
     send(m.chat.id, "📅 شیفتی را برای اصلاح تاریخ انتخاب کن:", reply_markup=keyboard)
 
+@bot.callback_query_handler(
+    func=lambda c: c.data and c.data.startswith("shiftdelete:")
+)
+def schedule_delete_callback(c):
+    if not _is_owner(c.from_user.id):
+        bot.answer_callback_query(
+            c.id,
+            "این پنل فقط برای مدیر اصلی فعال است.",
+            show_alert=True,
+        )
+        return
+
+    bot.answer_callback_query(c.id)
+
+    parts = c.data.split(":")
+    if len(parts) != 3 or not parts[2].isdigit():
+        return
+
+    action = parts[1]
+    sheet_id = int(parts[2])
+
+    sheet = next(
+        (
+            item for item in db.active_sheets()
+            if item["id"] == sheet_id
+        ),
+        None,
+    )
+
+    if not sheet:
+        send(
+            c.message.chat.id,
+            "این شیفت دیگر فعال نیست؛ فهرست را دوباره باز کن.",
+        )
+        return
+
+    if action == "ask":
+        jalali_date = (
+            jalali_day_month(sheet["scheduled_date"])
+            if sheet["scheduled_date"] else "بدون تاریخ"
+        )
+
+        keyboard = types.InlineKeyboardMarkup()
+        keyboard.row(
+            types.InlineKeyboardButton(
+                "✅ بله، حذف شود",
+                callback_data=f"shiftdelete:confirm:{sheet_id}",
+            ),
+            types.InlineKeyboardButton(
+                "❌ انصراف",
+                callback_data="shiftdelete:cancel:0",
+            ),
+        )
+
+        bot.send_message(
+            c.message.chat.id,
+            f"⚠️ برنامه‌ی {sheet['day']} ({jalali_date}) "
+            f"با {sheet['entry_count']} ردیف از برنامه‌های فعال حذف شود؟\n\n"
+            "این عملیات قابل لغو خودکار نیست.",
+            reply_markup=keyboard,
+        )
+        return
+
+    if action == "cancel":
+        try:
+            bot.edit_message_reply_markup(
+                c.message.chat.id,
+                c.message.message_id,
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+
+        send(c.message.chat.id, "عملیات حذف لغو شد.")
+        return
+
+    if action == "confirm":
+        entries = db.entries_for_sheet(sheet_id)
+
+        if not db.deactivate_sheet(sheet_id):
+            send(
+                c.message.chat.id,
+                "حذف انجام نشد؛ احتمالاً این شیفت قبلاً غیرفعال شده.",
+            )
+            return
+
+        recipients = {
+            entry["person"]
+            for entry in entries
+            if entry.get("person")
+        }
+
+        notified = 0
+        failed = []
+
+        jalali_date = (
+            jalali_day_month(sheet["scheduled_date"])
+            if sheet["scheduled_date"] else "بدون تاریخ"
+        )
+
+        message = (
+            f"🗑 برنامه‌ی {sheet['day']} ({jalali_date}) لغو شد. "
+            "لطفاً برنامه‌ی قبلی را ملاک قرار ندهید."
+        )
+
+        for name in recipients:
+            member = db.get_staff_by_name(name)
+
+            if not member or not member.get("telegram_id"):
+                continue
+
+            if send(member["telegram_id"], message):
+                notified += 1
+            else:
+                failed.append(name)
+
+        result = (
+            f"✅ برنامه‌ی {sheet['day']} ({jalali_date}) "
+            "از برنامه‌های فعال حذف شد."
+            f"\nاطلاع‌رسانی موفق: {notified} نفر"
+        )
+
+        if failed:
+            result += (
+                "\n⚠️ ارسال پیام به این افراد ناموفق بود: "
+                + ", ".join(sorted(failed))
+            )
+
+        send(c.message.chat.id, result)
+
+        try:
+            bot.edit_message_reply_markup(
+                c.message.chat.id,
+                c.message.message_id,
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+
+        return
 
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("shiftdate:"))
 def schedule_date_callback(c):
