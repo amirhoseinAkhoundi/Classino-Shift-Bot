@@ -11,8 +11,7 @@ from analysis import (
     day_label, day_of, jalali_date_parts, jalali_day_month, jalali_to_gregorian,
 )
 from app import (OWNER_TELEGRAM_ID, BTN_SCHEDULE_DATES, BTN_TEACHER_MANAGEMENT,
-                 BTN_STUDIO_MANAGEMENT, normalize_phone,
-                 bot, send)
+                 BTN_STUDIO_MANAGEMENT, bot, send)
 from schedule_parser import key, load_list, normalize
 
 SCHEDULE_DATE_PENDING = {}
@@ -475,12 +474,12 @@ def _finish_teacher_save(telegram_id, state):
     data = state["data"]
     teacher = data.get("teacher", "").strip()
     supervisor = data.get("supervisor", "").strip()
-    phone = normalize_phone(data.get("phone", ""))
+    phone = data.get("phone", "").strip()
     if not teacher or not supervisor:
         send(telegram_id, "نام استاد و سرپرست الزامی‌اند.")
         return
-    if phone and len(phone) != 10:
-        send(telegram_id, "شماره تماس باید ۱۰ رقم باشد.")
+    if phone and not re.fullmatch(r"\d{10,15}", phone):
+        send(telegram_id, "شماره تماس باید فقط شامل ۱۰ تا ۱۵ رقم باشد.")
         return
     try:
         if phone:
@@ -506,7 +505,7 @@ def _finish_teacher_save(telegram_id, state):
         supervisor_staff = db.get_staff_by_name(supervisor)
         if supervisor_staff and supervisor_staff["telegram_id"]:
             send(supervisor_staff["telegram_id"],
-                 f"شماره تماس استاد «{teacher}» ثبت شد: 0{phone}")
+                 f"شماره تماس استاد «{teacher}» ثبت شد: {phone}")
     send(telegram_id, f"✅ استاد «{teacher}» ذخیره شد.",
          reply_markup=types.ReplyKeyboardRemove())
 
@@ -718,7 +717,7 @@ def teacher_management_callback(c):
                  reply_markup=_teacher_supervisor_keyboard("edit", assignment["id"]))
         else:
             labels = {"teacher": "نام جدید استاد را وارد کن:",
-                      "phone": "شماره تماس استاد را با ۱۰ رقم وارد کن:"}
+                      "phone": "شماره تماس استاد را با ۱۰ تا ۱۵ رقم وارد کن:"}
             label = labels[parts[3]]
             send(chat_id, label, reply_markup=_cancel_keyboard())
     elif action == "remoteconfirm" and len(parts) == 4 and parts[2].isdigit() and parts[3] in ("0", "1"):
@@ -775,7 +774,7 @@ def teacher_management_callback(c):
         if state and state["action"] == "add" and state["step"] == "supervisor" and supervisor:
             state["data"]["supervisor"] = supervisor["name"]
             state["step"] = "phone"
-            send(chat_id, "شماره تماس استاد را با ۱۰ رقم وارد کن؛ اگر فعلاً ثبت نمی‌شود /skip بفرست:",
+            send(chat_id, "شماره تماس استاد را با ۱۰ تا ۱۵ رقم وارد کن؛ اگر فعلاً ثبت نمی‌شود /skip بفرست:",
                  reply_markup=_cancel_keyboard())
     elif action == "editsup" and len(parts) == 4 and parts[2].isdigit() and parts[3].isdigit():
         state = TEACHER_MANAGEMENT_PENDING.get(c.from_user.id)
@@ -815,6 +814,7 @@ def teacher_management_input(m):
         TEACHER_MANAGEMENT_PENDING.pop(m.from_user.id, None)
         send(m.chat.id, "این مرحله لغو شد یا دسترسی شما تغییر کرده است.")
         return
+    raw_text = m.text.strip()
     text = normalize(m.text).strip()
     if text in ("❌ لغو", "/cancel"):
         TEACHER_MANAGEMENT_PENDING.pop(m.from_user.id, None)
@@ -919,17 +919,17 @@ def teacher_management_input(m):
         else:
             _finish_teacher_save(m.from_user.id, state)
     elif field == "phone" and state["action"] == "add":
-        phone = normalize_phone(text) if text != "/skip" else ""
-        if phone and len(phone) != 10:
-            send(m.chat.id, "شماره تماس باید ۱۰ رقم باشد؛ دوباره وارد کن یا /skip بفرست:",
+        phone = "" if raw_text == "/skip" else raw_text
+        if phone and not re.fullmatch(r"\d{10,15}", phone):
+            send(m.chat.id, "شماره تماس باید فقط شامل ۱۰ تا ۱۵ رقم باشد؛ دوباره وارد کن یا /skip بفرست:",
                  reply_markup=_cancel_keyboard())
             return
         state["data"]["phone"] = phone
         _finish_teacher_save(m.from_user.id, state)
     elif field == "phone":
-        phone = normalize_phone(text)
-        if len(phone) != 10:
-            send(m.chat.id, "شماره تماس باید ۱۰ رقم باشد؛ دوباره وارد کن:",
+        phone = raw_text
+        if not re.fullmatch(r"\d{10,15}", phone):
+            send(m.chat.id, "شماره تماس باید فقط شامل ۱۰ تا ۱۵ رقم باشد؛ دوباره وارد کن:",
                  reply_markup=_cancel_keyboard())
             return
         try:
@@ -944,5 +944,5 @@ def teacher_management_input(m):
         if supervisor and supervisor["telegram_id"]:
             send(supervisor["telegram_id"],
                  f"شماره تماس استاد «{state['original_teacher']}» ثبت شد: 0{phone}")
-        send(m.chat.id, f"✅ شماره تماس استاد ثبت شد: 0{phone}",
+        send(m.chat.id, f"✅ شماره تماس استاد ثبت شد: {phone}",
              reply_markup=types.ReplyKeyboardRemove())
