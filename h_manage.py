@@ -16,7 +16,8 @@ from app import (ADMIN, ADMIN_ROLES, BTN_FREE, BTN_STATS, BTN_TEAM, BOT_MANAGER,
                  phone_display, staff_role_label, BTN_STAFF_MANAGEMENT, menu_for, normalize_phone, send,
                  staff_only)
 from reports import build_admins_xlsx, build_studios_xlsx
-from schedule_parser import DAYS, key, normalize, parse_range, fmt_min
+from schedule_parser import (DAYS, apply_helper_class_buffers, key, normalize, parse_range,
+                             fmt_min, person_matches, split_people)
 from scripts import seed_staff as staff_csv
 
 ROLES_OK = {MANAGER, SUP, ADMIN, BOT_MANAGER}
@@ -29,26 +30,52 @@ STAFF_CSV_PATH = staff_csv.DEFAULT_CSV_PATH
 
 
 def team_of(sup):
+    sup = dict(sup)
+    if is_admin_mode(sup) and sup.get("supervisor"):
+        members = [s for s in db.list_staff() if s["supervisor"] == sup["supervisor"]]
+        return members + ([sup] if sup["name"] not in {member["name"] for member in members} else [])
     return [s for s in db.list_staff() if s["supervisor"] == sup["name"]]
+
+
+def is_admin_mode(s):
+    value = dict(s)
+    return bool(value.get("_admin_mode") or (
+        value["role"] == BOT_MANAGER
+        and db.get_setting(f"manager_mode:{value['telegram_id']}") == "admin"))
+
+
+def full_access(s):
+    return s["role"] in FULL_ACCESS_ROLES and not is_admin_mode(s)
 
 
 def scoped_staff(s):
     """افرادی که این کاربر حق دیدنشان را دارد."""
-    if s["role"] in FULL_ACCESS_ROLES:
+    if full_access(s):
         return db.list_staff()
     return team_of(s)
 
 
+def entries_for_names(entries, names):
+    rows = []
+    for entry in entries:
+        visible = [name for name in names if person_matches(entry["person"], name)]
+        if visible:
+            row = dict(entry)
+            row["person"] = " و ".join(visible)
+            rows.append(row)
+    return rows
+
+
 def scoped_entries(s):
     es = db.active_entries()
-    if s["role"] in FULL_ACCESS_ROLES:
+    if full_access(s):
         return es
     names = {x["name"] for x in team_of(s)}
-    return [e for e in es if e["person"] in names]
+    return entries_for_names(es, names)
 
 
 def can_see(s, name):
-    if s["role"] in FULL_ACCESS_ROLES:
+    if full_access(s):
         return True
     return name == s["name"] or name in {x["name"] for x in team_of(s)}
 
@@ -97,6 +124,9 @@ def _send_free_report(chat, s, day, start, end):
         (now.date() + timedelta(days=1)).isoformat() if day == tomorrow else None)
     entries = db.entries_on_date(target_date, day=day) if target_date else db.active_entries(day)
     day_entries = [e for e in entries if e["person"]]
+    if is_admin_mode(s):
+        allowed = {member["name"] for member in scoped_staff(s)}
+        day_entries = entries_for_names(day_entries, allowed)
     if not day_entries:
         send(chat, f"برای {day_label(day, target_date)} هنوز برنامه‌ای ثبت نشده؛ "
              "نتیجه‌ی آزادبودن قابل اتکا نیست.", parse_mode="HTML")
@@ -104,8 +134,9 @@ def _send_free_report(chat, s, day, start, end):
     shift_date = target_date or next((e["shift_date"] for e in day_entries if e.get("shift_date")), None)
 
     free, off, busy = free_staff(staff, day_entries, day, start, end)
+    available_entries = apply_helper_class_buffers(day_entries)
     helper_entries = sort_entries([
-        entry for entry in day_entries
+        entry for entry in available_entries
         if entry["kind"] == "komaki" and entry["start_min"] < end and start < entry["end_min"]
     ])
     helpers = {}
@@ -163,7 +194,7 @@ def free_callback(c):
 
     uid, chat = c.from_user.id, c.message.chat.id
     staff = db.get_staff_by_tid(uid)
-    if not staff or staff["role"] not in MANAGEMENT_ROLES:
+    if not staff or staff["role"] not in MANAGEMENT_ROLES or is_admin_mode(staff):
         return
     if c.data == "free:cancel":
         FREE_PENDING.pop(uid, None)
@@ -192,7 +223,7 @@ def free_callback(c):
 def free_time_input(m):
     uid = m.from_user.id
     staff = db.get_staff_by_tid(uid)
-    if not staff or staff["role"] not in MANAGEMENT_ROLES:
+    if not staff or staff["role"] not in MANAGEMENT_ROLES or is_admin_mode(staff):
         FREE_PENDING.pop(uid, None)
         return
     day = FREE_PENDING[uid]
@@ -214,17 +245,21 @@ def free_time_input(m):
 @staff_only(*MANAGEMENT_ROLES)
 def stats_cmd(m, s):
     kb = types.InlineKeyboardMarkup()
-    if s["role"] in FULL_ACCESS_ROLES:
+    if full_access(s):
         kb.row(types.InlineKeyboardButton("🏢 گزارش استودیوها", callback_data="stats:studios"))
     kb.row(types.InlineKeyboardButton("👤 گزارش ادمین‌ها", callback_data="stats:admins"))
     send(m.chat.id, "کدوم گزارش رو می‌خوای؟", reply_markup=kb)
 
 
 def _admin_report_entries(s, entries):
+    s = dict(s)
+    if (s["role"] == BOT_MANAGER
+            and db.get_setting(f"manager_mode:{s['telegram_id']}") == "admin"):
+        s["_admin_mode"] = True
     admins = {person["name"] for person in db.list_staff(roles=ADMIN_ROLES)}
-    if s["role"] == SUP:
+    if s["role"] == SUP or s.get("_admin_mode"):
         admins &= {person["name"] for person in team_of(s)}
-    return [entry for entry in entries if entry["person"] in admins]
+    return entries_for_names(entries, admins)
 
 
 def _send_report_file(chat, uid, builder, caption, filename, entries):
@@ -258,12 +293,12 @@ def _stats_period_keyboard(report):
 def stats_report(c):
     bot.answer_callback_query(c.id)
     staff = db.get_staff_by_tid(c.from_user.id)
-    if not staff or staff["role"] not in MANAGEMENT_ROLES:
+    if not staff or staff["role"] not in MANAGEMENT_ROLES or is_admin_mode(staff):
         return
     parts = c.data.split(":")
     if len(parts) == 2 and parts[1] in ("studios", "admins"):
         report = parts[1]
-        if report == "studios" and staff["role"] not in FULL_ACCESS_ROLES:
+        if report == "studios" and not full_access(staff):
             send(c.message.chat.id, "گزارش استودیوها فقط برای مسئول شیفت و مدیر ربات در دسترسه.")
             return
         _delete_callback_message(c, "statistics report selection")
@@ -274,7 +309,7 @@ def stats_report(c):
             or parts[3] not in ("week", "month", "all"):
         return
     report, period = parts[2], parts[3]
-    if report == "studios" and staff["role"] not in FULL_ACCESS_ROLES:
+    if report == "studios" and not full_access(staff):
         return
     if period == "all" and report != "studios":
         return
@@ -338,10 +373,12 @@ def team(m, s):
     if not members:
         send(m.chat.id, "هنوز کسی زیر نظر تو ثبت نشده (ستون supervisor در staff.csv).")
         return
-    es = db.active_entries(day)
+    es = [entry for entry in scoped_entries(s) if entry["day"] == day]
     blocks = []
     for mem in members:
-        mine = sort_entries([e for e in es if e["person"] == mem["name"]])
+        mine = sort_entries([e for e in es if person_matches(e["person"], mem["name"])])
+        if is_admin_mode(s):
+            mine = [{**entry, "person": mem["name"]} for entry in mine]
         body = "\n".join("   " + entry_line(e, e.get("shift_date")) for e in mine) if mine else "   — شیفت ندارد"
         blocks.append(f"👤 {escape(mem['name'])} ({phone_display(mem)})\n{body}")
     today, tomorrow, _ = today_tomorrow()
@@ -365,6 +402,9 @@ def person(m, s):
         send(m.chat.id, "این فرد جزو تیم تو نیست.")
         return
     rows = db.entries_for_person(name)
+    if is_admin_mode(s):
+        rows = [{**row, "person": name} for row in rows
+                if person_matches(row["person"], name)]
     if not rows:
         send(m.chat.id, f"برای «{name}» شیفتی ثبت نشده.")
         return
@@ -378,16 +418,18 @@ def class_(m, s):
     if not q:
         send(m.chat.id, "مثال: /class فکری   یا   /class شیمی دهم")
         return
-    hits = [e for e in db.active_entries() if e["kind"] == "class"
+    entries = scoped_entries(s) if is_admin_mode(s) else db.active_entries()
+    hits = [e for e in entries if e["kind"] == "class"
             and q in key((e["teacher"] or "") + (e["course"] or ""))]
     if not hits:
         send(m.chat.id, "کلاسی پیدا نشد.")
         return
     lines = []
     for e in sort_entries(hits)[:40]:
-        ad = db.get_staff_by_name(e["person"]) if e["person"] else None
+        admins = [db.get_staff_by_name(name) for name in split_people(e["person"])]
+        phones = "، ".join(phone_display(admin) for admin in admins) or "—"
         lines.append(f"{day_label(e['day'], e.get('shift_date'))}\n\n"
-                     f"{entry_line(e, e.get('shift_date'), with_person=True)} ({phone_display(ad)})")
+                     f"{entry_line(e, e.get('shift_date'), with_person=True)} ({phones})")
     more = f"\n… و {len(hits) - 40} مورد دیگر" if len(hits) > 40 else ""
     send(m.chat.id, "\n".join(lines) + more, parse_mode="HTML")
 
@@ -399,7 +441,8 @@ def day_cmd(m, s):
     if not day:
         send(m.chat.id, "روز نامعتبر. مثال: /day یکشنبه")
         return
-    es = db.active_entries(day)
+    entries = scoped_entries(s) if is_admin_mode(s) else db.active_entries(day)
+    es = [entry for entry in entries if entry["day"] == day]
     if not es:
         send(m.chat.id, f"برای {day} برنامه‌ای ثبت نشده.")
         return
@@ -414,7 +457,7 @@ def day_cmd(m, s):
 @bot.message_handler(commands=["staff"], chat_types=["private"])
 @staff_only(*MANAGEMENT_ROLES)
 def staff_list(m, s):
-    rows = db.list_staff() if s["role"] in FULL_ACCESS_ROLES else team_of(s)
+    rows = db.list_staff() if full_access(s) else team_of(s)
     if not rows:
         send(m.chat.id, "لیستی نیست.")
         return
@@ -530,7 +573,7 @@ def _delete_staff(staff, actor_id):
 
 def _staff_manager(telegram_id):
     staff = db.get_staff_by_tid(telegram_id)
-    return staff if staff and staff["role"] in FULL_ACCESS_ROLES else None
+    return staff if staff and staff["role"] in FULL_ACCESS_ROLES and full_access(staff) else None
 
 
 def _show_staff_management(chat_id, text="🧑‍💼 مدیریت پرسنل\nانتخاب سمت برای مشاهده و ویرایش:"):
@@ -661,6 +704,9 @@ def _notify_staff_deletion(staff):
 @bot.message_handler(func=lambda m: m.text == BTN_STAFF_MANAGEMENT, chat_types=["private"])
 @staff_only(MANAGER, BOT_MANAGER)
 def staff_management(m, s):
+    if s.get("_admin_mode"):
+        send(m.chat.id, "مدیریت پرسنل فقط در حالت مدیر ربات در دسترس است.")
+        return
     _show_staff_management(m.chat.id)
 
 

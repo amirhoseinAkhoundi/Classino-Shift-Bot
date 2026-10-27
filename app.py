@@ -12,8 +12,9 @@ import db
 from schedule_parser import normalize
 
 MANAGER, SUP, ADMIN, BOT_MANAGER = "shift_manager", "supervisor", "admin", "bot_manager"
+TEACHER = "teacher"
 ROLE_FA = {MANAGER: "مسئول شیفت", SUP: "سرپرست", ADMIN: "ادمین",
-           BOT_MANAGER: "مدیر ربات"}
+           BOT_MANAGER: "مدیر ربات", TEACHER: "استاد"}
 ADMIN_ROLES = (ADMIN, BOT_MANAGER)
 
 
@@ -23,6 +24,9 @@ def staff_role_label(staff):
     return ROLE_FA.get(staff["role"], staff["role"])
 
 BTN_MY = "📋 شیفت‌های من"
+BTN_TEACHER_CLASSES = "📚 کلاس‌های من"
+BTN_TEACHER_ADMIN = "👤 ادمین کیه؟"
+BTN_DAILY_NOTIFICATIONS = "🔔 اطلاع‌رسانی روزانه"
 BTN_PROBLEM = "🆘 مشکل دارم"
 BTN_HELPER = "🙋 کمکی کیه؟"
 BTN_TEAM = "👥 تیم من"
@@ -32,6 +36,12 @@ BTN_STATS = "📊 آمار"
 BTN_STAFF_MANAGEMENT = "🧑‍💼 مدیریت پرسنل"
 BTN_SCHEDULE_DATES = "📅 اصلاح تاریخ شیفت"
 BTN_TEACHER_MANAGEMENT = "👩‍🏫 مدیریت استادها"
+BTN_STUDIO_MANAGEMENT = "🏢 مدیریت استودیوها"
+BTN_MODE = "🔄 تغییر حالت: مدیر ربات"
+BTN_MODE_ADMIN = "🛡 تغییر حالت: ادمین"
+BTN_NOTIFY = "📣 اطلاع به اساتید"
+BTN_TEACHER_PHONES = "📞 شماره تماس اساتید"
+BTN_BROADCAST = "📨 پیام به کاربران"
 OWNER_TELEGRAM_ID = 309425613
 
 _log_dir = os.path.dirname(config.DB_PATH) or "."
@@ -89,12 +99,27 @@ def staff_only(*roles):
             if not s:
                 send(m.chat.id, "اول در پی‌وی بات با /start هویتت را تایید کن.")
                 return
-            if roles and s["role"] not in roles:
+            context = staff_context(s)
+            if roles and context["role"] not in roles:
                 send(m.chat.id, "این دستور برای نقش تو نیست.")
                 return
-            return fn(m, s, *a, **k)
+            return fn(m, context, *a, **k)
         return wrapper
     return deco
+
+
+def staff_context(staff):
+    value = dict(staff)
+    if value["role"] in (ADMIN, TEACHER):
+        assignment = db.get_teacher_assignment(value["name"])
+        if assignment and assignment.get("phone") and assignment["phone"] == value.get("phone"):
+            value["role"] = TEACHER
+    admin_mode = (staff["role"] == BOT_MANAGER
+                  and db.get_setting(f"manager_mode:{staff['telegram_id']}") == "admin")
+    if admin_mode:
+        value["_admin_mode"] = True
+        value["role"] = ADMIN
+    return value
 
 
 def can_post(user_id) -> bool:
@@ -117,22 +142,41 @@ def phone_of(name) -> str:
     return phone_display(db.get_staff_by_name(name))
 
 
+def daily_notifications_enabled(staff_id):
+    return db.get_setting(f"daily_notifications:{staff_id}") != "off"
+
+
 def menu_for(s):
+    s = dict(s)
+    s = staff_context(s) if not s.get("_admin_mode") else s
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    rows = [
-        (BTN_MY,),
-        (BTN_PROBLEM, BTN_HELPER),
-    ]
-    if s["role"] == SUP:
-        rows.extend(((BTN_TEAM, BTN_NOTIFY), (BTN_FREE, BTN_STATS)))
-    elif s["role"] == BOT_MANAGER:
-        rows.extend(((BTN_TEAM, BTN_NOTIFY), (BTN_FREE, BTN_STATS)))
-    elif s["role"] == MANAGER:
-        rows.extend(((BTN_FREE, BTN_STATS), (BTN_NOTIFY,)))
-    if s["role"] in (MANAGER, BOT_MANAGER):
+    mode = bool(s.get("_admin_mode"))
+    rows = ([(BTN_TEACHER_CLASSES,), (BTN_TEACHER_ADMIN,)]
+            if s["role"] == TEACHER else [(BTN_MY,)])
+    notification_state = "روشن" if daily_notifications_enabled(s["id"]) else "خاموش"
+    rows.append((f"{BTN_DAILY_NOTIFICATIONS}: {notification_state}",))
+    rows.append((BTN_TEACHER_PHONES,))
+    if s["role"] != TEACHER:
+        if mode or s["role"] == ADMIN:
+            rows.append((BTN_PROBLEM, BTN_HELPER))
+        elif s["role"] == SUP:
+            rows.append((BTN_PROBLEM, BTN_HELPER))
+            rows.extend(((BTN_TEAM, BTN_NOTIFY), (BTN_FREE, BTN_STATS)))
+        elif s["role"] == BOT_MANAGER:
+            rows.append((BTN_MODE_ADMIN,))
+            rows.extend(((BTN_TEAM, BTN_NOTIFY), (BTN_FREE, BTN_STATS)))
+            rows.append((BTN_BROADCAST,))
+        elif s["role"] == MANAGER:
+            rows.append((BTN_PROBLEM, BTN_HELPER))
+            rows.extend(((BTN_FREE, BTN_STATS), (BTN_NOTIFY,)))
+        elif s["role"] == ADMIN:
+            rows.append((BTN_PROBLEM, BTN_HELPER))
+    if mode:
+        rows.append((BTN_MODE,))
+    if s["role"] in (MANAGER, BOT_MANAGER) and not mode:
         rows.append((BTN_STAFF_MANAGEMENT,))
-    if s["telegram_id"] == OWNER_TELEGRAM_ID:
-        rows.extend(((BTN_SCHEDULE_DATES,), (BTN_TEACHER_MANAGEMENT,)))
+    if s["telegram_id"] == OWNER_TELEGRAM_ID and not mode:
+        rows.extend(((BTN_SCHEDULE_DATES,), (BTN_TEACHER_MANAGEMENT, BTN_STUDIO_MANAGEMENT)))
     for row in rows:
         kb.row(*row)
     return kb

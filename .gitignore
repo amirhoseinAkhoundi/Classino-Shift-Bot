@@ -1,26 +1,9 @@
-# Secrets
 .env
-
-# Python
 venv/
 __pycache__/
 *.pyc
-*.pyo
-.pytest_cache/
-
-# Data & runtime (never commit real data)
 data/*.db
 data/*.db-*
 data/staff.csv
-data/bot.log*
-data/backup-*/
 backups/
-*.log
-
-# OS / editor
-.DS_Store
-Thumbs.db
-*.swp
-*.swo
-.idea/
-.vscode/
+data/bot.log*

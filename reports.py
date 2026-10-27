@@ -6,7 +6,7 @@ from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
 from analysis import fmt_entry, hours, sort_entries, stats
-from schedule_parser import DAYS
+from schedule_parser import DAYS, split_people
 
 
 def _sheet(wb, title, header, rows, first=False):
@@ -36,7 +36,8 @@ def build_xlsx(entries, path):
     per = defaultdict(lambda: defaultdict(int))
     for e in entries:
         if e["person"]:
-            per[e["person"]][e["day"]] += e["end_min"] - e["start_min"]
+            for person in split_people(e["person"]):
+                per[person][e["day"]] += e["end_min"] - e["start_min"]
     _sheet(wb, "ساعت هر روز", ["نام"] + days_present,
            [[p] + [float(hours(per[p].get(d, 0))) for d in days_present] for p in sorted(per)])
     _sheet(wb, "جزئیات", ["روز", "نوع", "شرح", "فرد"],

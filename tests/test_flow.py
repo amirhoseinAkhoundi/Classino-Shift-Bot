@@ -10,7 +10,8 @@ import config
 import db
 import h_ops
 import h_schedule
-from analysis import stats
+from analysis import find_conflicts, stats
+from schedule_parser import Entry, apply_helper_class_buffers, entry_to_dict
 
 SAMPLE = (pathlib.Path(__file__).parent / "sample_sunday.txt").read_text(encoding="utf-8")
 
@@ -171,10 +172,31 @@ def test_editing_schedule_preserves_dates_and_removing_a_day_removes_old_entries
     assert any("حذف شد" in text for _, text in env)
 
 
-def test_second_post_same_day_replaces_old_week(env):
+def test_readding_a_removed_day_uses_next_free_date_without_deactivating_new_schedule(env):
+    source_lines = [line for line in SAMPLE.splitlines()
+                    if line.strip() and line.strip() != "یکشنبه"]
+    two_days = SAMPLE + "\nجمعه\n" + "\n".join(source_lines)
+    initial = msg(two_days, mid=44)
+    h_schedule.ingest(initial)
+    h_schedule.ingest(msg(SAMPLE, mid=44))
+    h_schedule.ingest(msg(two_days, mid=45))
+
+    readded = msg(two_days, mid=44)
+    h_schedule.ingest(readded)
+
+    assert db.sheet_schedule_date(-100, 44, "جمعه") == "2026-10-23"
+    assert len(db.entries_on_date("2026-10-16", day="جمعه")) == 47
+    assert len(db.entries_on_date("2026-10-23", day="جمعه")) == 47
+    assert len(db.entries_on_date("2026-10-11", day="یکشنبه")) == 47
+    assert len(db.entries_on_date("2026-10-18", day="یکشنبه")) == 47
+
+
+def test_second_post_same_day_uses_next_free_week(env):
     h_schedule.ingest(msg(SAMPLE, mid=10))
     h_schedule.ingest(msg(SAMPLE, mid=11))
-    assert len(db.active_entries("یکشنبه")) == 47        # نسخه‌ی هفته‌ی قبل غیرفعال شد
+    assert len(db.active_entries("یکشنبه")) == 94
+    assert len(db.active_entries("یکشنبه", shift_date="2026-10-11")) == 47
+    assert len(db.active_entries("یکشنبه", shift_date="2026-10-18")) == 47
     assert len(db.historical_entries(kind="class")) == 84  # دو برنامه‌ی جداگانه‌ی هفتگی
 
 
@@ -184,7 +206,7 @@ def test_entries_on_date_reads_replaced_schedule_without_leaking_next_week(env):
     next_week.date = datetime(2026, 10, 18, 10, tzinfo=timezone.utc).timestamp()
     h_schedule.ingest(next_week)
 
-    assert db.active_entries("یکشنبه", shift_date="2026-10-11") == []
+    assert len(db.active_entries("یکشنبه", shift_date="2026-10-11")) == 47
     assert len(db.entries_on_date("2026-10-11", day="یکشنبه")) == 47
     assert len(db.entries_on_date("2026-10-18", day="یکشنبه")) == 47
     assert all(entry["shift_date"] == "2026-10-11"
@@ -199,8 +221,97 @@ def test_roles_now_and_incident_text(env):
     assert [e["person"] for e in helpers] == ["اشتری"]
     mine = [e for e in db.active_entries("یکشنبه") if e["person"] == "وحید" and e["kind"] == "class"]
     opt = h_ops._opts_from(mine)[0]
+    db.assign_teacher(opt["entry"]["teacher"], "فرستنده", "teacher")
+    db.set_teacher_telegram_id(opt["entry"]["teacher"], 404)
     text = h_ops.compose_incident(db.get_staff_by_name("وحید"), opt, "🔊 صدا", True, nazers, True, helpers, True)
-    assert "🚨" in text and "09120000003" in text and "اشتری (09120000006)" in text and "نیاز به کمک" in text
+    assert "🚨" in text and "09120000003" in text
+    assert f'<a href="tg://user?id=404">{opt["entry"]["teacher"]}</a>' in text
+    assert '<a href="tg://user?id=6">اشتری</a> (09120000006)' in text and "نیاز به کمک" in text
+
+
+def test_helper_is_unavailable_around_their_class_without_a_conflict(env):
+    entries = [
+        Entry("یکشنبه", "class", 600, 660, teacher="استاد", person="اشتری"),
+        Entry("یکشنبه", "komaki", 540, 900, person="اشتری"),
+    ]
+    db.save_sheet(-100, 99, 2, "یکشنبه", "test", entries,
+                  shift_date="2026-10-18", source_date="2026-10-18")
+
+    assert find_conflicts([
+        {**entry_to_dict(entry), "shift_date": "2026-10-18"} for entry in entries
+    ]) == []
+    before_class, _ = h_ops.roles_now("komaki", None, "یکشنبه", 569, "2026-10-18")
+    during_buffer, active = h_ops.roles_now("komaki", None, "یکشنبه", 570, "2026-10-18")
+    after_class, _ = h_ops.roles_now("komaki", None, "یکشنبه", 690, "2026-10-18")
+    assert [entry["person"] for entry in before_class] == ["اشتری"]
+    assert during_buffer == [] and not active
+    assert h_ops.helper_busy_until("یکشنبه", 570, "2026-10-18") == {"اشتری": 690}
+    assert [entry["person"] for entry in after_class] == ["اشتری"]
+    segmented = apply_helper_class_buffers(entries)
+    assert [(entry.start, entry.end) for entry in segmented if entry.kind == "komaki"] == [
+        (540, 570), (690, 900)]
+    last_segment = next(entry for entry in segmented
+                        if entry.kind == "komaki" and entry.start == 690)
+    assert last_segment.end == 900
+
+
+def test_problem_request_does_not_notify_helper_during_class_and_shows_until_time(env, monkeypatch):
+    entries = [
+        Entry("یکشنبه", "class", 600, 660, teacher="استاد", studio="بزرگ", person="وحید"),
+        Entry("یکشنبه", "class", 600, 660, teacher="استاد دیگر", studio="طوسی", person="اشتری"),
+        Entry("یکشنبه", "komaki", 540, 900, person="اشتری"),
+    ]
+    db.save_sheet(-100, 99, 2, "یکشنبه", "test", entries,
+                  shift_date="2026-10-18", source_date="2026-10-18")
+    monkeypatch.setattr(h_ops, "today_tomorrow", lambda: ("یکشنبه", "دوشنبه", 570))
+    monkeypatch.setattr(h_ops, "now_tehran", lambda: datetime(2026, 10, 18, 9, 30))
+    group_messages = []
+    notified = []
+    monkeypatch.setattr(h_ops, "post_group", lambda text: group_messages.append(text) or True)
+    monkeypatch.setattr(h_ops, "dm_staff", lambda name, *args, **kwargs: notified.append(name) or True)
+    h_ops.S[3] = {
+        "opt": {"studio": "بزرگ", "label": "بزرگ",
+                "entry": entry_to_dict(entries[0])},
+        "kind": "sound",
+    }
+
+    h_ops.finish_problem(3, 3, db.get_staff_by_tid(3), True)
+
+    assert "کمکی فعالی نیست" in to(env, 3)[-1]
+    assert '<a href="tg://user?id=6">اشتری</a> تا 11:30' in to(env, 3)[-1]
+    assert all("اشتری" not in message for message in group_messages)
+    assert "اشتری" not in notified
+    assert to(env, 6) == []
+
+
+def test_multi_admin_entries_are_retrievable_for_each_admin(env):
+    entry = Entry("یکشنبه", "class", 900, 960, teacher="استاد",
+                  studio="بزرگ", person="بابک و احسانی")
+    db.save_sheet(-100, 98, 2, "یکشنبه", "test", [entry],
+                  shift_date="2026-10-18", source_date="2026-10-18")
+
+    assert db.entries_for_person("بابک")[0]["person"] == "بابک و احسانی"
+    assert db.entries_for_person("احسانی")[0]["person"] == "بابک و احسانی"
+
+
+def test_teacher_assignment_phone_column_migrates(tmp_path, monkeypatch):
+    legacy_db = tmp_path / "teacher_assignment_legacy.db"
+    monkeypatch.setattr(config, "DB_PATH", str(legacy_db))
+    conn = sqlite3.connect(legacy_db)
+    try:
+        conn.execute(
+            "CREATE TABLE teacher_assignments(teacher_key TEXT PRIMARY KEY, teacher TEXT NOT NULL, "
+            "supervisor TEXT NOT NULL, username TEXT NOT NULL, telegram_id INTEGER, "
+            "assigned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    db.init_db()
+    with db.connect() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(teacher_assignments)")}
+    assert "phone" in columns
 
 
 def test_help_fallback_group_message_only_names_requester(env, monkeypatch):
@@ -213,9 +324,11 @@ def test_help_fallback_group_message_only_names_requester(env, monkeypatch):
     mine = [e for e in db.active_entries("یکشنبه") if e["person"] == "وحید" and e["kind"] == "class"]
     h_ops.S[3] = {"opt": h_ops._opts_from(mine)[0]}
     h_ops.finish_help(2, 3, db.get_staff_by_tid(3))
-    assert group_messages == ["وحید کمک می‌خواد."]
+    assert len(group_messages) == 1
+    assert "می‌تونی بری طوسی2 کمک" in group_messages[0]
+    assert '<a href="tg://user?id=3">وحید</a>' in group_messages[0]
+    assert "اشتری" in group_messages[0]
     assert "09120000003" not in group_messages[0]
-    assert "اشتری" not in group_messages[0]
 
 
 def test_stats_on_sample(env):

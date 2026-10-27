@@ -8,10 +8,10 @@ from html import escape
 import config
 import db
 from analysis import (day_label, diff_entries, diff_notes, entry_line, find_conflicts,
-                     next_weekday_on_or_after, now_tehran, sort_entries, strike_past,
+                     now_tehran, sort_entries, strike_past,
                      tehran_timezone)
 from app import BOT_MANAGER, MANAGER, SUP, bot, can_post, send
-from schedule_parser import DAYS, entry_to_dict, key, load_list, normalize, parse_schedule
+from schedule_parser import DAYS, entry_to_dict, key, load_list, normalize, parse_schedule, split_people
 
 STUDIOS = load_list("data/studios.txt")
 TEACHERS = load_list("data/teachers.txt")
@@ -51,7 +51,8 @@ def addteacher(m):
 
 def _leaders(exclude_id):
     return [s for s in db.list_staff(roles=(MANAGER, SUP, BOT_MANAGER))
-            if s["telegram_id"] and s["telegram_id"] != exclude_id]
+            if s["telegram_id"]
+    ]
 
 
 def _message_source_date(m):
@@ -72,7 +73,9 @@ def ingest(m):
     if not (in_group or m.chat.type == "private"):  # پی‌وی فقط برای تست توسط فرستنده‌ی مجاز
         return
     remote = known("remote_teacher", REMOTE)
-    res = parse_schedule(m.text, known("studio", STUDIOS), known("teacher", TEACHERS), remote)
+    admin_names = [staff["name"] for staff in db.list_staff(roles=("admin", "bot_manager"))]
+    res = parse_schedule(m.text, known("studio", STUDIOS), known("teacher", TEACHERS),
+                         remote, admin_names=admin_names)
     if len(res.entries) < config.MIN_PARSED_LINES:
         return  # شبیه برنامه نیست
 
@@ -86,24 +89,24 @@ def _commit_schedule(chat_id, message_id, sender_id, schedule_text, source_date,
     days.extend(day for day in old_days if day not in res.days)
     blocks, conflicts, kinds = defaultdict(list), [], []
     for day in days:
+        old = db.latest_entries_for_sheet(chat_id, message_id, day)
         shift_date = db.sheet_schedule_date(chat_id, message_id, day)
-        if not shift_date:
-            shift_date = next_weekday_on_or_after(source_date, day)
+        if not old:
+            shift_date = db.first_available_schedule_date(day, source_date)
         new = []
         for e in res.entries:
             if e.day == day:
                 item = entry_to_dict(e)
                 item["shift_date"] = shift_date
                 new.append(item)
-        old = db.latest_entries_for_sheet(chat_id, message_id, day)
         db.save_sheet(chat_id, message_id, sender_id, day, schedule_text, res.entries,
                       shift_date=shift_date, source_date=source_date)
         conflicts += find_conflicts(new)
-        if old is None:
+        if not old:
             by = defaultdict(list)
             for e in new:
-                if e["person"]:
-                    by[e["person"]].append(e)
+                for person in split_people(e["person"]):
+                    by[person].append(e)
             for p, es in by.items():
                 blocks[p].append(
                     f"📅 برنامه‌ی جدید — {day_label(day, shift_date)}\n"

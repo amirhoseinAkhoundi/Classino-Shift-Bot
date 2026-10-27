@@ -1,18 +1,18 @@
 """پارس متن برنامه‌ی روزانه به ورودی‌های ساختاریافته (بدون وابستگی به تلگرام)."""
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 _DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
 
 DAYS = ["شنبه", "یکشنبه", "دوشنبه", "سه‌شنبه", "چهارشنبه", "پنجشنبه", "جمعه"]
 
-TIME_RE = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*تا\s*(\d{1,2})(?::(\d{2}))?")
+TIME_RE = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*(?:تا|-|–|—|to)\s*(\d{1,2})(?::(\d{2}))?")
 KINDS = {"نظارت": "nazer", "کمکی": "komaki", "ادمین کمکی": "komaki"}
 COURSE_STARTS = {
     "آمار", "ادبیات", "احتمال", "ایکیو", "تاریخ", "تجربی", "جامع", "حسابان",
     "خلاقیت", "دبستان", "دهم", "دوازدهم", "ریاضی", "زیست", "شیمی", "فلسفه",
     "فیزیک", "عمومی", "علوم", "مرداد", "منطق", "نمایشی", "نهم", "هفتم",
-    "هشتم", "یازدهم", "چهارم", "پنجم", "پیش",
+    "هشتم", "یازدهم", "چهارم", "پنجم", "پیش", "انسانی",
 }
 
 
@@ -24,6 +24,14 @@ def normalize(text: str) -> str:
 def key(s: str) -> str:
     """کلید مقایسه: بدون فاصله و نیم‌فاصله."""
     return re.sub(r"[\s\u200c]", "", s)
+
+
+def split_people(value):
+    return [name.strip() for name in re.split(r"\s+و\s+", normalize(value or "")) if name.strip()]
+
+
+def person_matches(value, name):
+    return any(key(person) == key(name) for person in split_people(value))
 
 
 DAY_KEYS = {key(d): d for d in DAYS}
@@ -88,7 +96,36 @@ def _time(m):
     return s, e
 
 
-def parse_schedule(text: str, studios: dict, teachers: dict, remote: dict | None = None) -> ParseResult:
+def _person_and_note(value, admin_names):
+    value = value.strip()
+    note = re.search(r"\s*\(([^()]*)\)\s*$", value)
+    note_text = f"({note.group(1).strip()})" if note else ""
+    value = value[:note.start()].strip() if note else value
+    tokens = value.split()
+    names = sorted(admin_names, key=lambda name: len(name.split()), reverse=True)
+    matched = []
+    cursor = 0
+    while cursor < len(tokens):
+        hit = next((name for name in names
+                    if key(" ".join(tokens[cursor:cursor + len(name.split())])) == key(name)), None)
+        if not hit:
+            break
+        matched.append(hit)
+        cursor += len(hit.split())
+        if cursor < len(tokens) and key(tokens[cursor]) == key("و"):
+            cursor += 1
+        elif cursor < len(tokens):
+            break
+    if matched:
+        note_text = " ".join(part for part in (note_text, " ".join(tokens[cursor:])) if part)
+        person_text = " و ".join(matched)
+    else:
+        person_text = value
+    return person_text, note_text
+
+
+def parse_schedule(text: str, studios: dict, teachers: dict, remote: dict | None = None,
+                   admin_names=()) -> ParseResult:
     """remote: اساتید خارج از ایران؛ استودیو ندارند و بعد از ساعت فقط اسم ادمین می‌آید."""
     remote = remote or {}
     res = ParseResult()
@@ -139,10 +176,20 @@ def parse_schedule(text: str, studios: dict, teachers: dict, remote: dict | None
             teacher, k = _unknown_teacher_prefix(before)
             res.new_teachers.add(teacher)
             res.warnings.append((line, "نام استاد در فهرست نیست؛ ممکن است نام چندبخشی باشد"))
+        elif k < len(before):
+            course_start = next((index for index in range(k, len(before))
+                                 if key(before[index]) in COURSE_STARTS), None)
+            if course_start is not None and 0 < course_start - k <= 2:
+                teacher = " ".join(before[:course_start])
+                k = course_start
+                res.new_teachers.add(teacher)
         course = " ".join(before[k:]) or None
 
         if key(teacher) in remote:  # آنلاین: بدون استودیو
-            person = " ".join(after) or None
+            person_text, note = _person_and_note(" ".join(after), admin_names)
+            if note:
+                course = f"{course or ''} {note}".strip()
+            person = " و ".join(split_people(person_text)) or None
             if person is None:
                 res.warnings.append((line, "ادمین کلاس مشخص نیست"))
             res.entries.append(Entry(day, "class", start, end, teacher, course, None, person))
@@ -150,21 +197,85 @@ def parse_schedule(text: str, studios: dict, teachers: dict, remote: dict | None
 
         studio, k2 = _prefix(after, studios)
         if studio:
-            person = " ".join(after[k2:]) or None
+            person_text = " ".join(after[k2:])
         else:
             if not after:
                 res.warnings.append((line, "استودیو و ادمین نیست"))
                 continue
             if len(after) == 1:
-                studio, person = None, after[0]
+                studio, person_text = None, after[0]
             else:
-                studio = " ".join(after[:-1])
-                person = after[-1]
-                res.new_studios.add(studio)
+                if "و" in after:
+                    separator = after.index("و")
+                    studio = " ".join(after[:separator - 1]) or None
+                    person_text = " ".join(after[separator - 1:])
+                else:
+                    admin_count = len(split_people(" ".join(after)))
+                    studio = " ".join(after[:-admin_count]) or None
+                    person_text = " ".join(after[-admin_count:])
+                    if admin_count == 1 and not any(
+                            key(name) == key(person_text) for name in admin_names):
+                        studio, person_text = " ".join(after[:-1]), after[-1]
+                if studio:
+                    res.new_studios.add(studio)
+        person_text, note = _person_and_note(person_text, admin_names)
+        if note:
+            course = f"{course or ''} {note}".strip()
+        person = " و ".join(split_people(person_text)) or None
         if person is None:
             res.warnings.append((line, "ادمین کلاس مشخص نیست"))
         res.entries.append(Entry(day, "class", start, end, teacher, course, studio, person))
     return res
+
+
+def apply_helper_class_buffers(entries, minutes=30):
+    def value(entry, field):
+        if isinstance(entry, dict):
+            return entry[field]
+        return getattr(entry, field)
+
+    classes = [entry for entry in entries
+               if value(entry, "kind") == "class" and value(entry, "person")]
+    result = []
+    for entry in entries:
+        if value(entry, "kind") != "komaki" or not value(entry, "person"):
+            result.append(entry)
+            continue
+        blocks = sorted(
+            (max(0, value(cls, "start_min" if isinstance(cls, dict) else "start") - minutes),
+             min(24 * 60, value(cls, "end_min" if isinstance(cls, dict) else "end") + minutes))
+            for cls in classes
+            if value(cls, "day") == value(entry, "day")
+            and person_matches(value(cls, "person"), value(entry, "person"))
+            and value(cls, "start_min" if isinstance(cls, dict) else "start") - minutes
+            < value(entry, "end_min" if isinstance(entry, dict) else "end")
+            and value(cls, "end_min" if isinstance(cls, dict) else "end") + minutes
+            > value(entry, "start_min" if isinstance(entry, dict) else "start")
+        )
+        start_field = "start_min" if isinstance(entry, dict) else "start"
+        end_field = "end_min" if isinstance(entry, dict) else "end"
+        segments = [(value(entry, start_field), value(entry, end_field))]
+        for block_start, block_end in blocks:
+            remaining = []
+            for start, end in segments:
+                if block_end <= start or block_start >= end:
+                    remaining.append((start, end))
+                    continue
+                if start < block_start:
+                    remaining.append((start, block_start))
+                if block_end < end:
+                    remaining.append((block_end, end))
+            segments = remaining
+        for start, end in segments:
+            if start >= end:
+                continue
+            if isinstance(entry, dict):
+                segment = dict(entry)
+                segment[start_field], segment[end_field] = start, end
+                result.append(segment)
+            else:
+                result.append(replace(entry, start=start, end=end))
+    return result
 
 
 def entry_to_dict(e: "Entry") -> dict:

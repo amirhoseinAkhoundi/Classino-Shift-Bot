@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS staff (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,        -- دقیقاً همان‌طور که در برنامه نوشته می‌شود
     phone TEXT UNIQUE,                -- ۱۰ رقم آخر، مثل 9121234567
-    role TEXT NOT NULL,               -- shift_manager | supervisor | admin | bot_manager
+    role TEXT NOT NULL,               -- shift_manager | supervisor | admin | bot_manager | teacher
     supervisor TEXT,                  -- نام سرپرست این عضو تیم
     telegram_id INTEGER UNIQUE,       -- بعد از تایید هویت پر می‌شود
     verified_at TEXT
@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS teacher_assignments (
     teacher TEXT NOT NULL,
     supervisor TEXT NOT NULL,
     username TEXT NOT NULL,
+    phone TEXT,
     telegram_id INTEGER,
     assigned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -122,6 +123,8 @@ def init_db():
         assignment_cols = {r["name"] for r in c.execute("PRAGMA table_info(teacher_assignments)")}
         if "telegram_id" not in assignment_cols:
             c.execute("ALTER TABLE teacher_assignments ADD COLUMN telegram_id INTEGER")
+        if "phone" not in assignment_cols:
+            c.execute("ALTER TABLE teacher_assignments ADD COLUMN phone TEXT")
         c.execute("UPDATE staff SET role='supervisor' WHERE role='observer'")
         c.execute("UPDATE staff SET role='bot_manager' WHERE role='database_admin'")
         c.execute(
@@ -179,6 +182,10 @@ def upsert_staff(name, phone, role, supervisor=None):
     elif role == "database_admin":
         role = "bot_manager"
     with connect() as c:
+        teacher = c.execute("SELECT phone FROM teacher_assignments WHERE teacher_key=?",
+                            (key(normalize(name)),)).fetchone()
+        if teacher and teacher["phone"] and teacher["phone"] == phone:
+            role = "teacher"
         c.execute(
             "INSERT INTO staff(name, phone, role, supervisor) VALUES(?,?,?,?) "
             "ON CONFLICT(name) DO UPDATE SET phone=excluded.phone, role=excluded.role, supervisor=excluded.supervisor",
@@ -243,6 +250,35 @@ def find_staff_by_phone(phone):
         return c.execute("SELECT * FROM staff WHERE phone=?", (phone,)).fetchone()
 
 
+def set_teacher_contact(teacher, phone, supervisor):
+    with connect() as c:
+        c.execute("UPDATE teacher_assignments SET phone=? WHERE teacher_key=?",
+                  (phone, key(normalize(teacher))))
+        staff = c.execute("SELECT id, role FROM staff WHERE name=?", (teacher,)).fetchone()
+        if staff:
+            if staff["role"] not in ("admin", "teacher"):
+                raise ValueError("این نام در فهرست پرسنل متعلق به ادمین نیست.")
+            c.execute("UPDATE staff SET phone=?, role='teacher', supervisor=? WHERE id=?",
+                      (phone, supervisor, staff["id"]))
+        else:
+            c.execute("INSERT INTO staff(name, phone, role, supervisor) VALUES(?,?,?,?)",
+                      (teacher, phone, "teacher", supervisor))
+
+
+def get_teacher_group(teacher):
+    with connect() as c:
+        row = c.execute("SELECT * FROM teacher_groups WHERE teacher_key=?",
+                        (key(normalize(teacher)),)).fetchone()
+    return dict(row) if row else None
+
+
+def unlink_teacher(teacher):
+    with connect() as c:
+        result = c.execute("DELETE FROM teacher_groups WHERE teacher_key=?",
+                           (key(normalize(teacher)),))
+    return result.rowcount > 0
+
+
 def get_staff_by_tid(tid):
     with connect() as c:
         return c.execute("SELECT * FROM staff WHERE telegram_id=?", (tid,)).fetchone()
@@ -265,14 +301,7 @@ def get_staff_by_name(name):
 def bind_telegram(staff_id, tid):
     with connect() as c:
         c.execute("UPDATE staff SET telegram_id=?, verified_at=CURRENT_TIMESTAMP WHERE id=?", (tid, staff_id))
-def ensure_owner(tid, name="مدیر ربات"):
-    """مالک را بدون CSV و بدون احراز شماره، به‌عنوان bot_manager ثبت می‌کند."""
-    with connect() as c:
-        if c.execute("SELECT 1 FROM staff WHERE telegram_id=?", (tid,)).fetchone():
-            return
-        c.execute(
-            "INSERT INTO staff(name, phone, role, telegram_id, verified_at) "
-            "VALUES(?, NULL, 'bot_manager', ?, CURRENT_TIMESTAMP)", (name, tid))
+
 
 # ---------- schedule ----------
 def sheet_week_start(chat_id, message_id, day):
@@ -322,6 +351,28 @@ def active_schedule_dates():
     return dates
 
 
+def first_available_schedule_date(day, source_date):
+    from datetime import date, timedelta
+    from analysis import next_weekday_on_or_after
+
+    scheduled_date = next_weekday_on_or_after(source_date, day)
+    with connect() as c:
+        occupied = {
+            row["scheduled_date"] for row in c.execute(
+                "SELECT s.scheduled_date FROM sheets s "
+                "JOIN sheet_versions v ON v.sheet_id=s.id "
+                "AND v.version=(SELECT MAX(latest.version) FROM sheet_versions latest "
+                "WHERE latest.sheet_id=s.id) "
+                "JOIN entries e ON e.version_id=v.id "
+                "WHERE s.active=1 AND s.day=? AND s.scheduled_date IS NOT NULL",
+                (day,),
+            )
+        }
+    while scheduled_date in occupied:
+        scheduled_date = (date.fromisoformat(scheduled_date) + timedelta(days=7)).isoformat()
+    return scheduled_date
+
+
 def save_sheet(chat_id, message_id, sender_id, day, raw_text, entries, week_start=None,
                shift_date=None, source_date=None):
     """برای هر (پیام، روز) یک sheet؛ هر ادیت یک نسخه‌ی جدید. برمی‌گرداند (sheet_id, version)."""
@@ -335,19 +386,28 @@ def save_sheet(chat_id, message_id, sender_id, day, raw_text, entries, week_star
         if row:
             sheet_id = row["id"]
             week_start = row["week_start"] or week_start
-            shift_date = row["scheduled_date"] or shift_date
+            latest_has_entries = c.execute(
+                "SELECT EXISTS(SELECT 1 FROM sheet_versions v JOIN entries e ON e.version_id=v.id "
+                "WHERE v.sheet_id=? AND v.version=(SELECT MAX(version) FROM sheet_versions "
+                "WHERE sheet_id=?))",
+                (sheet_id, sheet_id),
+            ).fetchone()[0]
+            shift_date = row["scheduled_date"] if latest_has_entries else (shift_date or row["scheduled_date"])
             source_missing = not row["source_date"]
             source_date = row["source_date"] or source_date
             if week_start and not row["week_start"]:
                 c.execute("UPDATE sheets SET week_start=? WHERE id=?", (week_start, sheet_id))
+            if shift_date != row["scheduled_date"]:
+                c.execute("UPDATE sheets SET scheduled_date=?, active=1 WHERE id=?",
+                          (shift_date, sheet_id))
         else:
             shift_date = shift_date or next_weekday_on_or_after(source_date, day)
             sheet_id = c.execute(
                 "INSERT INTO sheets(chat_id, message_id, day, week_start, scheduled_date, source_date, sender_id) "
                 "VALUES(?,?,?,?,?,?,?)",
                 (chat_id, message_id, day, week_start, shift_date, source_date, sender_id)).lastrowid
-            # برنامه‌ی جدید همان روز، قبلی را غیرفعال می‌کند
-            c.execute("UPDATE sheets SET active=0 WHERE day=? AND id<>?", (day, sheet_id))
+            c.execute("UPDATE sheets SET active=0 WHERE day=? AND scheduled_date=? AND id<>?",
+                      (day, shift_date, sheet_id))
         if not shift_date:
             shift_date = next_weekday_on_or_after(source_date, day)
             c.execute("UPDATE sheets SET scheduled_date=? WHERE id=?", (shift_date, sheet_id))
@@ -502,11 +562,24 @@ def historical_entries(kind=None):
 
 
 def entries_for_person(name, shift_date=None):
+    from schedule_parser import person_matches
     if shift_date:
-        return [entry for entry in entries_on_date(shift_date) if entry["person"] == name]
+        return [entry for entry in entries_on_date(shift_date)
+                if person_matches(entry["person"], name)]
     with connect() as c:
-        query, params = ACTIVE_ENTRIES + " AND e.person = ?", [name]
-        return [dict(r) for r in c.execute(query, params)]
+        rows = c.execute(ACTIVE_ENTRIES).fetchall()
+    return [dict(row) for row in rows if person_matches(row["person"], name)]
+
+
+def entries_for_teacher(name, shift_date=None):
+    teacher_key = key(normalize(name))
+    if shift_date:
+        rows = entries_on_date(shift_date)
+    else:
+        with connect() as c:
+            rows = [dict(row) for row in c.execute(ACTIVE_ENTRIES).fetchall()]
+    return [entry for entry in rows
+            if entry["kind"] == "class" and key(normalize(entry.get("teacher") or "")) == teacher_key]
 
 
 # ---------- نام‌های آموخته‌شده (استاد/استودیو) ----------
@@ -604,6 +677,13 @@ def get_setting(name, default=None):
     return row["value"] if row else default
 
 
+def get_settings(prefix):
+    with connect() as c:
+        rows = c.execute("SELECT key, value FROM settings WHERE substr(key, 1, ?) = ?",
+                         (len(prefix), prefix)).fetchall()
+    return {row["key"][len(prefix):]: row["value"] for row in rows}
+
+
 def set_setting(name, value):
     with connect() as c:
         c.execute("INSERT INTO settings(key, value) VALUES(?,?) "
@@ -694,6 +774,10 @@ def update_teacher_assignment(teacher, new_teacher, supervisor, username):
             "assigned_at=CURRENT_TIMESTAMP WHERE teacher_key=?",
             (new_key, new_teacher, supervisor, username.lstrip("@"), old_key),
         )
+        linked_staff = c.execute("SELECT id, role FROM staff WHERE name=?", (teacher,)).fetchone()
+        if linked_staff and linked_staff["role"] in ("admin", "teacher"):
+            c.execute("UPDATE staff SET name=?, supervisor=? WHERE id=?",
+                      (new_teacher, supervisor, linked_staff["id"]))
         c.execute("INSERT OR IGNORE INTO known_names(kind, name) VALUES('teacher', ?)",
                   (new_teacher,))
     return True
@@ -702,12 +786,15 @@ def update_teacher_assignment(teacher, new_teacher, supervisor, username):
 def delete_teacher_assignment(teacher):
     teacher_key = key(normalize(teacher))
     with connect() as c:
-        assignment = c.execute("SELECT teacher FROM teacher_assignments WHERE teacher_key=?",
+        assignment = c.execute("SELECT teacher, phone FROM teacher_assignments WHERE teacher_key=?",
                                (teacher_key,)).fetchone()
         if not assignment:
             return False
         c.execute("DELETE FROM teacher_groups WHERE teacher_key=?", (teacher_key,))
         c.execute("DELETE FROM teacher_assignments WHERE teacher_key=?", (teacher_key,))
+        if assignment["phone"]:
+            c.execute("DELETE FROM staff WHERE name=? AND phone=? AND role IN ('admin', 'teacher')",
+                      (assignment["teacher"], assignment["phone"]))
     return True
 
 

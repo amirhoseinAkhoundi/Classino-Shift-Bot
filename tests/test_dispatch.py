@@ -8,12 +8,14 @@ from telebot import types
 import app
 import bot as _bot  # noqa: F401  (ثبت همه‌ی هندلرها به همان ترتیب اجرای واقعی)
 import db
+import daily_notifications
 import h_ops
 import h_manage
 import h_staff
 from app import (BTN_FREE, BTN_HELPER, BTN_MY, BTN_PROBLEM, BTN_SCHEDULE_DATES, BTN_STATS,
-                 BTN_STAFF_MANAGEMENT, BTN_TEACHER_MANAGEMENT, BTN_TEAM,
-                 BOT_MANAGER, OWNER_TELEGRAM_ID, menu_for)
+                 BTN_DAILY_NOTIFICATIONS, BTN_MODE, BTN_MODE_ADMIN, BTN_STAFF_MANAGEMENT,
+                 BTN_TEACHER_MANAGEMENT, BTN_TEAM, BTN_STUDIO_MANAGEMENT, BTN_TEACHER_ADMIN,
+                 BTN_TEACHER_CLASSES, BOT_MANAGER, OWNER_TELEGRAM_ID, TEACHER, menu_for)
 from tests.test_flow import SAMPLE, env  # noqa: F401
 
 _ids = itertools.count(1)
@@ -95,6 +97,166 @@ def test_my_command_and_button(live):
     assert len(t) == 2 and "📅 یکشنبه" in t[0] and "طوسی2" in t[0]
 
 
+def test_teacher_my_button_shows_classes_by_teacher_name(live, monkeypatch):
+    monkeypatch.setattr(h_staff, "now_tehran", lambda: datetime(2026, 10, 18, 17))
+    db.assign_teacher("استاد نمونه", "فرستنده", "")
+    db.set_teacher_contact("استاد نمونه", "9120000777", "فرستنده")
+    db.bind_telegram(db.find_staff_by_phone("9120000777")["id"], 77)
+    assert db.get_staff_by_tid(77)["role"] == TEACHER
+    labels = {button["text"] for row in menu_for(db.get_staff_by_tid(77)).keyboard for button in row}
+    assert BTN_TEACHER_CLASSES in labels and BTN_MY not in labels
+    with db.connect() as conn:
+        entry = conn.execute(
+            "SELECT rowid FROM entries WHERE kind='class' ORDER BY rowid LIMIT 1").fetchone()
+        conn.execute("UPDATE entries SET teacher=? WHERE rowid=?", ("استاد نمونه", entry[0]))
+
+    say(77, BTN_TEACHER_CLASSES)
+    text = to(live, 77)[-1]
+    assert "استاد نمونه" in text
+    assert "آریان ریاضی تجربی و حسابان یازدهم" not in text
+    assert "در این روز کلاسی ندارید." in text
+
+
+def test_teacher_only_has_my_classes_and_no_helper_or_problem_access(live, monkeypatch):
+    commands = []
+    alerts = []
+    monkeypatch.setattr(app.bot, "set_my_commands",
+                        lambda items, **kwargs: commands.extend(item.command for item in items))
+    monkeypatch.setattr(app.bot, "answer_callback_query",
+                        lambda *args, **kwargs: alerts.append(kwargs))
+    db.assign_teacher("استاد دسترسی", "فرستنده", "")
+    db.set_teacher_contact("استاد دسترسی", "9120000778", "فرستنده")
+    staff = db.find_staff_by_phone("9120000778")
+    db.bind_telegram(staff["id"], 78)
+    teacher = db.get_staff_by_tid(78)
+
+    say(78, "/start")
+    labels = {button["text"] for row in menu_for(teacher).keyboard for button in row}
+    assert labels == {BTN_TEACHER_CLASSES, BTN_TEACHER_ADMIN,
+                      f"{BTN_DAILY_NOTIFICATIONS}: روشن"}
+    assert commands == ["my"]
+
+    say(78, "/problem")
+    assert "این دستور برای نقش تو نیست" in to(live, 78)[-1]
+    say(78, "/helper")
+    assert "این دستور برای نقش تو نیست" in to(live, 78)[-1]
+    say(78, "/today")
+    assert "این دستور برای نقش تو نیست" in to(live, 78)[-1]
+    say(78, "/help")
+    assert "این دستور برای نقش تو نیست" in to(live, 78)[-1]
+
+    app.bot.process_new_updates([callback(78, "op:hy")])
+    assert 78 not in h_ops.S
+    assert alerts[-1].get("show_alert") is True
+
+
+def test_daily_notifications_toggle_is_direct_and_available_to_every_role(live):
+    roles = ("admin", "supervisor", "shift_manager", "bot_manager")
+    for index, role in enumerate(roles, start=100):
+        db.upsert_staff(f"کاربر {role}", f"9120000{index:03d}", role)
+        staff = db.find_staff_by_phone(f"9120000{index:03d}")
+        db.bind_telegram(staff["id"], index)
+        labels = {button["text"] for row in menu_for(db.get_staff_by_tid(index)).keyboard
+                  for button in row}
+        assert f"{BTN_DAILY_NOTIFICATIONS}: روشن" in labels
+
+    assert app.daily_notifications_enabled(db.get_staff_by_tid(3)["id"])
+    say(3, f"{BTN_DAILY_NOTIFICATIONS}: روشن")
+    assert not app.daily_notifications_enabled(db.get_staff_by_tid(3)["id"])
+    labels = {button["text"] for row in menu_for(db.get_staff_by_tid(3)).keyboard
+              for button in row}
+    assert f"{BTN_DAILY_NOTIFICATIONS}: خاموش" in labels
+
+    say(3, f"{BTN_DAILY_NOTIFICATIONS}: خاموش")
+    assert app.daily_notifications_enabled(db.get_staff_by_tid(3)["id"])
+
+
+def test_daily_notifications_send_today_schedule_once_to_all_staff_roles(live, monkeypatch):
+    db.assign_teacher("استاد یادآوری", "فرستنده", "")
+    db.set_teacher_contact("استاد یادآوری", "9120000780", "فرستنده")
+    teacher = db.find_staff_by_phone("9120000780")
+    db.bind_telegram(teacher["id"], 80)
+    roles = ("admin", "supervisor", "shift_manager", "bot_manager")
+    for index, role in enumerate(roles, start=110):
+        db.upsert_staff(f"کاربر {role}", f"9120001{index:03d}", role)
+        staff = db.find_staff_by_phone(f"9120001{index:03d}")
+        db.bind_telegram(staff["id"], index)
+
+    entries = [{
+        "id": 1, "day": "یکشنبه", "kind": "class", "start_min": 900, "end_min": 960,
+        "teacher": "استاد یادآوری", "course": "ریاضی", "studio": "بزرگ",
+        "person": "ادمین نمونه", "shift_date": "2026-10-18",
+    }]
+    reminder_recipients = [db.get_staff_by_tid(uid) for uid in
+                           [80, *range(110, 110 + len(roles))]]
+    monkeypatch.setattr(db, "list_staff", lambda roles=None: reminder_recipients)
+    monkeypatch.setattr(db, "entries_for_teacher", lambda name, shift_date=None: entries)
+    monkeypatch.setattr(db, "entries_for_person", lambda name, shift_date=None: entries)
+    sent = []
+    monkeypatch.setattr(app.bot, "send_message",
+                        lambda chat, text, **kwargs: sent.append((chat, text)))
+
+    assert daily_notifications.send_daily_notifications("2026-10-18") == len(roles) + 1
+    assert len(sent) == len(roles) + 1
+    teacher_text = next(text for chat, text in sent if chat == 80)
+    assert "استاد استاد یادآوری گرامی" in teacher_text
+    assert "کلاس‌های امروز شما" in teacher_text
+    assert "ادمین: ادمین نمونه" in teacher_text
+    assert daily_notifications.send_daily_notifications("2026-10-18") == 0
+    assert len(sent) == len(roles) + 1
+
+
+def test_teacher_can_look_up_class_admin_names_and_phones_by_day(live, monkeypatch):
+    db.assign_teacher("استاد ارتباط", "فرستنده", "")
+    db.set_teacher_contact("استاد ارتباط", "9120000779", "فرستنده")
+    teacher = db.find_staff_by_phone("9120000779")
+    db.bind_telegram(teacher["id"], 79)
+    db.upsert_staff("بابک", "9120000099", "admin")
+    with db.connect() as conn:
+        entries = conn.execute(
+            "SELECT id FROM entries WHERE kind='class' ORDER BY id LIMIT 2").fetchall()
+        conn.execute("UPDATE entries SET teacher=?, person=? WHERE id=?",
+                     ("استاد ارتباط", "بابک و احسانی", entries[0]["id"]))
+        conn.execute("UPDATE entries SET teacher=?, person=? WHERE id=?",
+                     ("استاد ارتباط", "احسانی و ادمین بدون شماره", entries[1]["id"]))
+
+    sent = []
+    monkeypatch.setattr(app.bot, "send_message",
+                        lambda chat, text, **kwargs: sent.append((chat, text, kwargs)))
+    say(79, BTN_TEACHER_CLASSES)
+    assert "ادمین: بابک و احسانی" in sent[-1][1]
+
+    say(79, BTN_TEACHER_ADMIN)
+    day_button = sent[-1][2]["reply_markup"].keyboard[0][0]
+    app.bot.process_new_updates([callback(79, day_button.callback_data)])
+    class_buttons = sent[-1][2]["reply_markup"].keyboard
+    class_callbacks = [row[0].callback_data for row in class_buttons]
+    assert len(class_callbacks) == 2
+    from analysis import span
+    matching = h_staff._teacher_schedule_rows("استاد ارتباط")[:2]
+    for button_row, entry in zip(class_buttons, matching):
+        label = button_row[0].text
+        assert "استاد ارتباط" not in label
+        assert (entry["course"] or "بدون عنوان") in label
+        assert (entry["studio"] or "آنلاین") in label
+        assert span(entry) in label
+
+    app.bot.process_new_updates([callback(79, class_callbacks[0])])
+    assert "بابک — 09120000099" in sent[-1][1]
+    assert "احسانی — 09120000007" in sent[-1][1]
+    assert "ادمین(های) این کلاس:" in sent[-1][1]
+
+    app.bot.process_new_updates([callback(79, class_callbacks[1])])
+    assert "احسانی — 09120000007" in sent[-1][1]
+    assert "ادمین بدون شماره — شماره موجود نیست" in sent[-1][1]
+
+    with db.connect() as conn:
+        conn.execute("UPDATE entries SET person=? WHERE id=?",
+                     ("ادمین به‌روز", entries[0]["id"]))
+    say(79, BTN_TEACHER_CLASSES)
+    assert "ادمین: ادمین به‌روز" in sent[-1][1]
+
+
 def test_my_schedule_marks_past_today_and_days_off(live, monkeypatch):
     monkeypatch.setattr(h_staff, "today_tomorrow", lambda: ("یکشنبه", "دوشنبه", 17 * 60))
     monkeypatch.setattr(h_staff, "now_tehran", lambda: datetime(2026, 10, 18, 17))
@@ -161,37 +323,53 @@ def test_bot_manager_menu_and_permissions(live):
     assert DOCS[-1][1]["visible_file_name"] == "classino-studios-week.xlsx"
 
 
-def test_owner_can_add_multiword_teacher_and_remote_teacher_from_management_panel(live):
+def test_bot_manager_can_switch_between_manager_and_regular_admin_modes(live):
+    db.upsert_staff("مدیر ربات", "9120000088", BOT_MANAGER, "فرستنده")
+    db.bind_telegram(db.find_staff_by_phone("9120000088")["id"], 8)
+    say(8, BTN_MODE_ADMIN)
+    assert "ادمین ساده" in to(live, 8)[-1]
+    app.bot.process_new_updates([callback(8, "manager_mode:admin")])
+    manager = db.get_staff_by_tid(8)
+    labels = {button["text"] for row in menu_for(manager).keyboard for button in row}
+    assert db.get_setting("manager_mode:8") == "admin"
+    assert BTN_MODE in labels and BTN_MY in labels
+    assert BTN_PROBLEM in labels and BTN_HELPER in labels
+    assert BTN_TEAM not in labels and BTN_FREE not in labels and BTN_STATS not in labels
+    assert BTN_STAFF_MANAGEMENT not in labels
+    assert app.staff_context(manager)["role"] == "admin"
+    say(8, "/team")
+    assert "این دستور برای نقش تو نیست" in to(live, 8)[-1]
+    say(8, "/stats")
+    assert "این دستور برای نقش تو نیست" in to(live, 8)[-1]
+    say(8, "/help")
+    assert "/team" not in to(live, 8)[-1]
+
+    say(8, BTN_MODE)
+    app.bot.process_new_updates([callback(8, "manager_mode:bot_manager")])
+    labels = {button["text"] for row in menu_for(manager).keyboard for button in row}
+    assert BTN_MODE_ADMIN in labels and BTN_MODE not in labels
+    assert BTN_STAFF_MANAGEMENT in labels
+
+
+def test_owner_can_manage_teacher_names_without_a_remote_teacher_list(live):
     import h_admin
     import h_schedule
 
     register_owner()
+    teacher_index = h_admin._teacher_names().index("بام رفیع")
+    known_index = h_admin._known_names("teacher").index("بام رفیع")
     say(OWNER_TELEGRAM_ID, BTN_TEACHER_MANAGEMENT)
-    app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, "teacherm:names")])
-    app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, "teacherm:nameadd:teacher")])
-    say(OWNER_TELEGRAM_ID, "بام")
-    names = h_admin._known_names("teacher")
-    index = names.index("بام")
-    app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, f"teacherm:name:teacher:{index}")])
-    app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, f"teacherm:namerename:teacher:{index}")])
+    app.bot.process_new_updates([
+        callback(OWNER_TELEGRAM_ID, f"teacherm:select_name:{teacher_index}")])
+    app.bot.process_new_updates([
+        callback(OWNER_TELEGRAM_ID, f"teacherm:name:teacher:{known_index}")])
+    app.bot.process_new_updates([
+        callback(OWNER_TELEGRAM_ID, f"teacherm:namerename:teacher:{known_index}")])
     say(OWNER_TELEGRAM_ID, "بام رفیع")
-    assert "بام رفیع" in db.get_known("teacher") and "بام" not in db.get_known("teacher")
+    assert "بام رفیع" in db.get_known("teacher")
 
-    app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, "teacherm:names")])
-    app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, "teacherm:nameadd:remote_teacher")])
-    say(OWNER_TELEGRAM_ID, "استاد آنلاین")
-    assert "استاد آنلاین" in db.get_known("teacher")
-    assert "استاد آنلاین" in db.get_known("remote_teacher")
-    names = h_admin._known_names("remote_teacher")
-    index = names.index("استاد آنلاین")
-    app.bot.process_new_updates([
-        callback(OWNER_TELEGRAM_ID, f"teacherm:name:remote_teacher:{index}")])
-    app.bot.process_new_updates([
-        callback(OWNER_TELEGRAM_ID, f"teacherm:namerename:remote_teacher:{index}")])
-    say(OWNER_TELEGRAM_ID, "آنلاین نمونه")
-    assert "استاد آنلاین" not in h_schedule.known("teacher", h_schedule.TEACHERS).values()
     assert h_schedule.known("teacher", h_schedule.TEACHERS)["بامرفیع"] == "بام رفیع"
-    assert h_schedule.known("remote_teacher", h_schedule.REMOTE)["آنلایننمونه"] == "آنلاین نمونه"
+    assert h_schedule.known("remote_teacher", h_schedule.REMOTE)
 
 
 def test_owner_can_add_arbitrary_alias_for_teacher_from_panel(live):
@@ -200,20 +378,105 @@ def test_owner_can_add_arbitrary_alias_for_teacher_from_panel(live):
 
     register_owner()
     db.add_known("teacher", ["بام رفیع"])
+    teacher_index = h_admin._teacher_names().index("بام رفیع")
     say(OWNER_TELEGRAM_ID, BTN_TEACHER_MANAGEMENT)
-    app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, "teacherm:names")])
-    app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, "teacherm:names:teacher")])
-    index = h_admin._known_names("teacher").index("بام رفیع")
-    app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, f"teacherm:name:teacher:{index}")])
-    app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, f"teacherm:aliasadd:teacher:{index}")])
+    app.bot.process_new_updates([
+        callback(OWNER_TELEGRAM_ID, f"teacherm:select_name:{teacher_index}")])
+    known_index = h_admin._known_names("teacher").index("بام رفیع")
+    app.bot.process_new_updates([
+        callback(OWNER_TELEGRAM_ID, f"teacherm:name:teacher:{known_index}")])
+    app.bot.process_new_updates([
+        callback(OWNER_TELEGRAM_ID, f"teacherm:aliasadd:teacher:{known_index}")])
     say(OWNER_TELEGRAM_ID, "بام‌رفیع")
 
     assert h_schedule.known("teacher", h_schedule.TEACHERS)["بامرفیع"] == "بام رفیع"
-    index = h_admin._known_names("teacher").index("بام رفیع")
-    app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, f"teacherm:name:teacher:{index}")])
-    app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, f"teacherm:namerename:teacher:{index}")])
+    known_index = h_admin._known_names("teacher").index("بام رفیع")
+    app.bot.process_new_updates([
+        callback(OWNER_TELEGRAM_ID, f"teacherm:name:teacher:{known_index}")])
+    app.bot.process_new_updates([
+        callback(OWNER_TELEGRAM_ID, f"teacherm:namerename:teacher:{known_index}")])
     say(OWNER_TELEGRAM_ID, "بام رفیع اصلی")
     assert h_schedule.known("teacher", h_schedule.TEACHERS)["بامرفیع"] == "بام رفیع اصلی"
+
+
+def test_teacher_panel_merges_schedule_names_and_assignments(live, monkeypatch):
+    import h_admin
+
+    register_owner()
+    db.assign_teacher("همدانی", "فرستنده", "")
+    messages = []
+    monkeypatch.setattr(app.bot, "send_message",
+                        lambda chat_id, text, **kwargs: messages.append((chat_id, text, kwargs)))
+    say(OWNER_TELEGRAM_ID, BTN_TEACHER_MANAGEMENT)
+
+    teacher_names = h_admin._teacher_names()
+    teacher_keys = [h_admin.key(name) for name in teacher_names]
+    assert len(teacher_keys) == len(set(teacher_keys))
+    assert "همدانی" in teacher_names and "بام رفیع" in teacher_names
+    buttons = {button.text for row in messages[-1][2]["reply_markup"].keyboard for button in row}
+    assert any("همدانی" in label for label in buttons)
+    assert any("بام رفیع" in label for label in buttons)
+    assert not any("نام‌های استاد در برنامه" in label for label in buttons)
+
+    known_index = teacher_names.index("بام رفیع")
+    app.bot.process_new_updates([
+        callback(OWNER_TELEGRAM_ID, f"teacherm:select_name:{known_index}")])
+    assert "هنوز سرپرست" in messages[-1][1]
+    app.bot.process_new_updates([
+        callback(OWNER_TELEGRAM_ID, f"teacherm:assign:{known_index}")])
+    supervisor_id = db.get_staff_by_name("فرستنده")["id"]
+    app.bot.process_new_updates([
+        callback(OWNER_TELEGRAM_ID, f"teacherm:addsup:{supervisor_id}")])
+    say(OWNER_TELEGRAM_ID, "09120000126")
+    assignment = db.get_teacher_assignment("بام رفیع")
+    assert assignment and assignment["supervisor"] == "فرستنده"
+    assert assignment["phone"] == "9120000126"
+
+
+def test_owner_manages_studios_from_separate_home_panel(live):
+    import h_admin
+    import h_schedule
+
+    register_owner()
+    say(OWNER_TELEGRAM_ID, BTN_STUDIO_MANAGEMENT)
+    assert "مدیریت استودیوها" in to(live, OWNER_TELEGRAM_ID)[-1]
+    keyboard = menu_for(db.get_staff_by_tid(OWNER_TELEGRAM_ID)).keyboard
+    buttons = {button["text"] for row in keyboard for button in row}
+    assert BTN_TEACHER_MANAGEMENT in buttons and BTN_STUDIO_MANAGEMENT in buttons
+
+    app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, "studiom:nameadd:studio")])
+    say(OWNER_TELEGRAM_ID, "استودیو آزمایشی")
+    index = h_admin._known_names("studio").index("استودیو آزمایشی")
+    app.bot.process_new_updates([
+        callback(OWNER_TELEGRAM_ID, f"studiom:name:studio:{index}")])
+    app.bot.process_new_updates([
+        callback(OWNER_TELEGRAM_ID, f"studiom:building:studio:{index}")])
+    say(OWNER_TELEGRAM_ID, "ساختمان آزمایشی")
+    assert h_ops.load_buildings()[h_ops.key("استودیو آزمایشی")] == "ساختمان آزمایشی"
+
+    app.bot.process_new_updates([
+        callback(OWNER_TELEGRAM_ID, f"studiom:name:studio:{index}")])
+    app.bot.process_new_updates([
+        callback(OWNER_TELEGRAM_ID, f"studiom:aliasadd:studio:{index}")])
+    say(OWNER_TELEGRAM_ID, "استودیو تست")
+    assert h_schedule.known("studio", h_schedule.STUDIOS)["استودیوتست"] == "استودیو آزمایشی"
+
+    app.bot.process_new_updates([
+        callback(OWNER_TELEGRAM_ID, f"studiom:namerename:studio:{index}")])
+    say(OWNER_TELEGRAM_ID, "استودیو اصلی")
+    assert h_schedule.known("studio", h_schedule.STUDIOS)["استودیوتست"] == "استودیو اصلی"
+    assert h_ops.load_buildings()[h_ops.key("استودیو اصلی")] == "ساختمان آزمایشی"
+    index = h_admin._known_names("studio").index("استودیو اصلی")
+    app.bot.process_new_updates([
+        callback(OWNER_TELEGRAM_ID, f"studiom:namedelete:studio:{index}")])
+    app.bot.process_new_updates([
+        callback(OWNER_TELEGRAM_ID, f"studiom:namedeleteconfirm:studio:{index}")])
+    assert "استودیو اصلی" not in h_admin._known_names("studio")
+    assert h_ops.key("استودیو اصلی") not in h_ops.load_buildings()
+    app.bot.process_new_updates([
+        callback(OWNER_TELEGRAM_ID, "teacherm:nameadd:studio")])
+    say(OWNER_TELEGRAM_ID, "استودیو مسیر تکراری")
+    assert "استودیو مسیر تکراری" not in db.get_known("studio")
 
 
 def test_teacher_management_has_no_schedule_approval_toggle(live):
@@ -465,19 +728,25 @@ def test_owner_teacher_panel_adds_edits_and_deletes_assignment(live):
     app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, "teacherm:add")])
     say(OWNER_TELEGRAM_ID, "استاد آزمایشی")
     app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, f"teacherm:addsup:{supervisor_id}")])
-    say(OWNER_TELEGRAM_ID, "@ostad_test")
+    assert "شماره تماس" in to(live, OWNER_TELEGRAM_ID)[-1]
+    assert "نام کاربری" not in to(live, OWNER_TELEGRAM_ID)[-1]
+    say(OWNER_TELEGRAM_ID, "09120000124")
     assignment = db.get_teacher_assignment("استاد آزمایشی")
-    assert assignment["supervisor"] == "فرستنده" and assignment["username"] == "ostad_test"
+    assert assignment["supervisor"] == "فرستنده" and assignment["phone"] == "9120000124"
+    assert db.find_staff_by_phone("9120000124")["role"] == TEACHER
 
     assignment_id = db.list_teacher_assignments()[0]["id"]
     app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, f"teacherm:select:{assignment_id}")])
+    assert "سرپرست: فرستنده" in to(live, OWNER_TELEGRAM_ID)[-1]
+    assert "شماره تماس: 9120000124" in to(live, OWNER_TELEGRAM_ID)[-1]
+    assert "شناسه تلگرام" not in to(live, OWNER_TELEGRAM_ID)[-1]
     app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, f"teacherm:edit:{assignment_id}")])
     app.bot.process_new_updates(
         [callback(OWNER_TELEGRAM_ID, f"teacherm:field:{assignment_id}:teacher")])
     say(OWNER_TELEGRAM_ID, "استاد ویرایش‌شده")
     assignment = db.get_teacher_assignment("استاد ویرایش‌شده")
     assert assignment and assignment["teacher"] == "استاد ویرایش‌شده"
-    assert assignment["username"] == "ostad_test"
+    assert assignment["phone"] == "9120000124"
 
     assignment_id = db.list_teacher_assignments()[0]["id"]
     app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, f"teacherm:select:{assignment_id}")])
@@ -491,14 +760,44 @@ def test_owner_teacher_panel_adds_edits_and_deletes_assignment(live):
     app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, f"teacherm:select:{assignment_id}")])
     app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, f"teacherm:edit:{assignment_id}")])
     app.bot.process_new_updates(
-        [callback(OWNER_TELEGRAM_ID, f"teacherm:field:{assignment_id}:username")])
-    say(OWNER_TELEGRAM_ID, "@ostad_new")
-    assert db.get_teacher_assignment("استاد ویرایش‌شده")["username"] == "ostad_new"
+        [callback(OWNER_TELEGRAM_ID, f"teacherm:field:{assignment_id}:phone")])
+    say(OWNER_TELEGRAM_ID, "09120000555")
+    assert db.get_teacher_assignment("استاد ویرایش‌شده")["phone"] == "9120000555"
 
     app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, f"teacherm:select:{assignment_id}")])
     app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, f"teacherm:delete:{assignment_id}")])
     app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, f"teacherm:deleteconfirm:{assignment_id}")])
     assert db.get_teacher_assignment("استاد ویرایش‌شده") is None
+
+
+def test_teacher_panel_manages_phone_group_and_online_mode(live):
+    register_owner()
+    db.assign_teacher("استاد پنل", "فرستنده", "teacher_panel")
+    assignment_id = db.list_teacher_assignments()[0]["id"]
+    app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, f"teacherm:select:{assignment_id}")])
+    app.bot.process_new_updates(
+        [callback(OWNER_TELEGRAM_ID, f"teacherm:field:{assignment_id}:phone")])
+    say(OWNER_TELEGRAM_ID, "09120000123")
+
+    assert db.get_teacher_assignment("استاد پنل")["phone"] == "9120000123"
+    assert db.get_staff_by_name("استاد پنل")["role"] == TEACHER
+    assert db.find_staff_by_phone("9120000123")["supervisor"] == "فرستنده"
+    assert "9120000123" in to(live, 2)[-1]
+
+    app.bot.process_new_updates(
+        [callback(OWNER_TELEGRAM_ID, f"teacherm:grouplink:{assignment_id}")])
+    say(OWNER_TELEGRAM_ID, "-500")
+    assert db.get_teacher_group("استاد پنل")["chat_id"] == -500
+    app.bot.process_new_updates(
+        [callback(OWNER_TELEGRAM_ID, f"teacherm:groupunlink:{assignment_id}")])
+    assert db.get_teacher_group("استاد پنل") is None
+
+    app.bot.process_new_updates(
+        [callback(OWNER_TELEGRAM_ID, f"teacherm:remoteconfirm:{assignment_id}:0")])
+    assert "استودیو از برنامه‌های این استاد حذف" in to(live, OWNER_TELEGRAM_ID)[-1]
+    app.bot.process_new_updates(
+        [callback(OWNER_TELEGRAM_ID, f"teacherm:remotetoggle:{assignment_id}:0")])
+    assert "استاد پنل" in db.get_known("remote_teacher")
 
 
 def test_non_owner_cannot_use_teacher_management_callbacks(live):
@@ -520,9 +819,14 @@ def test_problem_button_chain_posts_to_group_and_dms_helpers(live):
     assert "کمک حضوری" in to(live, 3)[1]
     app.bot.process_new_updates([callback(3, "op:nh:1")])
     group = to(live, -100)
-    assert group == ["وحید کمک می‌خواد."]
+    assert len(group) == 1
+    assert '<a href="tg://user?id=3">وحید</a> در طوسی2 مشکل' in group[0]
+    assert "ناظر شیفت:" in group[0] and "کمکی شیفت:" in group[0]
+    assert '<a href="tg://user?id=6">اشتری</a>' in group[0]
     response = to(live, 3)[-1]
-    assert "مهدیان (09120000005)" in response and "اشتری (09120000006)" in response
+    assert '<a href="tg://user?id=5">مهدیان</a> (09120000005)' in response
+    assert '<a href="tg://user?id=6">اشتری</a> (09120000006)' in response
+    assert '<a href="tg://user?id=5">مهدیان</a>' in to(live, 6)[0]
     assert to(live, 5) and to(live, 6)                     # چون کمک خواسته، ناظر/کمکی مستقیم هم خبر شدند
 
 
@@ -532,24 +836,27 @@ def test_problem_number_only_does_not_ask_for_studio_again(live):
     app.bot.process_new_updates([callback(3, "op:nh:0")])
 
     replies = to(live, 3)
-    assert "اشتری (09120000006)" in replies[-1]
+    assert '<a href="tg://user?id=6">اشتری</a> (09120000006)' in replies[-1]
     assert not any("کدوم استودیویی؟" in text for text in replies)
     assert h_ops.S.get(3) is None
 
 
 def test_helper_button_confirms_identity_then_notifies(live):
     say(4, "/helper")
-    assert "اشتری (09120000006)" in to(live, 4)[0]
+    assert '<a href="tg://user?id=6">اشتری</a> (09120000006)' in to(live, 4)[0]
     app.bot.process_new_updates([callback(4, "op:hy")])    # مهران ۱۷:۰۰: منفی1
-    assert "تو استودیو «منفی1» هستی؟" in to(live, 4)[1]
-    app.bot.process_new_updates([callback(4, "op:cf:1")])
+    assert "کدوم استودیویی؟" in to(live, 4)[1]
+    app.bot.process_new_updates([callback(4, "op:st:0")])
     assert "منفی1" in to(live, 6)[0] and "09120000004" in to(live, 6)[0]   # اشتری شماره‌ی مهران را گرفت
-    assert "اشتری" in to(live, 4)[2]
+    assert '<a href="tg://user?id=4">مهران</a>' in to(live, -100)[-1]
+    assert "مستقیم در بات" in to(live, 4)[-1]
 
 
 def test_supervisor_links_teacher_group_and_notifies(live, monkeypatch):
     import h_teachers
     monkeypatch.setattr(h_teachers.time, "sleep", lambda s: None)
+    monkeypatch.setattr(h_teachers, "today_tomorrow", lambda: ("یکشنبه", "دوشنبه", 17 * 60))
+    monkeypatch.setattr(h_teachers, "now_tehran", lambda: datetime(2026, 10, 18, 17))
     db.assign_teacher("فکری", "فرستنده", "fikri_teacher")
     db.assign_teacher("مرادی", "فرستنده", "moradi_teacher")
     say(2, "/linkteacher فکری", chat_id=-500, chat_type="supergroup")
@@ -569,6 +876,8 @@ def test_supervisor_links_teacher_group_and_notifies(live, monkeypatch):
 def test_supervisor_registers_teacher_id_and_future_notification_mentions_id(live, monkeypatch):
     import h_teachers
     monkeypatch.setattr(h_teachers.time, "sleep", lambda s: None)
+    monkeypatch.setattr(h_teachers, "today_tomorrow", lambda: ("یکشنبه", "دوشنبه", 17 * 60))
+    monkeypatch.setattr(h_teachers, "now_tehran", lambda: datetime(2026, 10, 18, 17))
     db.assign_teacher("فکری", "فرستنده", "fikri_teacher")
     say(2, "/linkteacher فکری", chat_id=-500, chat_type="supergroup")
 
@@ -614,9 +923,9 @@ def test_only_assigned_supervisor_or_bot_manager_can_link_teacher_group(live):
 
     db.upsert_staff("آخوندی", "9129271665", BOT_MANAGER)
     db.bind_telegram(db.find_staff_by_phone("9129271665")["id"], 8)
-    say(8, "/assignteacher بهرام پور | فرستنده | @bahram_teacher")
+    db.assign_teacher("بهرام پور", "فرستنده", "")
     assignment = db.get_teacher_assignment("بهرام پور")
-    assert assignment["supervisor"] == "فرستنده" and assignment["username"] == "bahram_teacher"
+    assert assignment["supervisor"] == "فرستنده"
     say(8, "/linkteacher بهرام پور", chat_id=-701, chat_type="supergroup")
     assert "وصل شد" in to(live, -701)[-1]
     say(8, "/registerteacher", chat_id=-701, chat_type="supergroup", reply_to_uid=405)

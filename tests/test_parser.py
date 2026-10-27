@@ -126,3 +126,45 @@ def test_alias_forms_map_to_canonical_teacher_and_studio_names():
     )
     assert [(entry.teacher, entry.studio) for entry in result.entries] == [
         ("بام رفیع", "سفید1"), ("بام رفیع", "سفید1")]
+
+
+def test_class_accepts_multiple_admins_and_trailing_class_notes():
+    result = parse_schedule(
+        "شنبه\n"
+        "مودت ریاضی سوم 14:30تا15:30 بابک و احسانی\n"
+        "آریان نوبان انسانی دوازدهم 15تا18 منفی1 مهران (مردادی‌ها ساعت ۱۶ اضافه شن)",
+        STUDIOS, TEACHERS, REMOTE, admin_names=["بابک", "احسانی", "مهران"],
+    )
+    first, second = result.entries
+    assert first.person == "بابک و احسانی"
+    assert first.studio is None
+    assert second.person == "مهران"
+    assert second.studio == "منفی1"
+    assert second.teacher == "آریان نوبان"
+    assert second.course.endswith("(مردادی‌ها ساعت 16 اضافه شن)")
+
+
+def test_unknown_multiple_admins_do_not_become_an_unknown_studio():
+    result = parse_schedule(
+        "شنبه\nمودت ریاضی سوم 14:30تا15:30 بابک و احسانی",
+        STUDIOS, TEACHERS, REMOTE,
+    )
+    entry = result.entries[0]
+    assert entry.studio is None
+    assert entry.person == "بابک و احسانی"
+    assert not result.new_studios
+
+
+def test_unknown_single_admin_and_unknown_studio_keep_existing_fallback():
+    result = parse_schedule(
+        "شنبه\nنوشین ریاضی نهم 15تا16 اتاق7 رضا",
+        STUDIOS, TEACHERS, REMOTE,
+    )
+    entry = result.entries[0]
+    assert (entry.studio, entry.person) == ("اتاق7", "رضا")
+
+
+def test_schedule_admin_names_are_split_into_individual_people():
+    from schedule_parser import split_people
+
+    assert split_people("بابک و احسانی") == ["بابک", "احسانی"]

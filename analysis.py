@@ -3,7 +3,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from html import escape
 
-from schedule_parser import DAYS, fmt_min, normalize, parse_day
+from schedule_parser import DAYS, fmt_min, normalize, parse_day, split_people
 
 PY_TO_FA = {5: "شنبه", 6: "یکشنبه", 0: "دوشنبه", 1: "سه‌شنبه", 2: "چهارشنبه", 3: "پنجشنبه", 4: "جمعه"}
 JALALI_MONTHS = ("فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور",
@@ -240,8 +240,14 @@ def find_conflicts(entries):
                     out.append(f"⛔ تداخل استودیو «{escape(a['studio'])}» ({label}):{both}")
                 if a["teacher"] == b["teacher"]:
                     out.append(f"⛔ استاد «{escape(a['teacher'] or '')}» هم‌زمان دو کلاس دارد ({label}):{both}")
-            if a["person"] and a["person"] == b["person"]:
-                out.append(f"⛔ «{escape(a['person'])}» هم‌زمان دو شیفت دارد ({label}):{both}")
+            shared_people = {normalize(name) for name in split_people(a["person"])} & {
+                normalize(name) for name in split_people(b["person"])
+            }
+            if shared_people:
+                if {a["kind"], b["kind"]} == {"class", "komaki"}:
+                    continue
+                names = "، ".join(sorted(shared_people))
+                out.append(f"⛔ «{escape(names)}» هم‌زمان دو شیفت دارد ({label}):{both}")
     return out
 
 
@@ -294,29 +300,32 @@ def diff_notes(removed, added, changed):
     """برای هر نفرِ درگیر، فقط خطوط مربوط به خودش."""
     notes = defaultdict(list)
     for e in removed:
-        if e["person"]:
-            notes[e["person"]].append("➖ حذف شد: " + fmt_entry(e))
+        for person in split_people(e["person"]):
+            notes[person].append("➖ حذف شد: " + fmt_entry(e))
     for e in added:
-        if e["person"]:
-            notes[e["person"]].append("➕ اضافه شد: " + fmt_entry(e))
+        for person in split_people(e["person"]):
+            notes[person].append("➕ اضافه شد: " + fmt_entry(e))
     for o, n in changed:
         if o["person"] == n["person"]:
-            if o["person"]:
-                notes[o["person"]].append(f"✏️ تغییر:\n   قبل: {fmt_entry(o)}\n   بعد: {fmt_entry(n)}")
+            for person in split_people(o["person"]):
+                notes[person].append(f"✏️ تغییر:\n   قبل: {fmt_entry(o)}\n   بعد: {fmt_entry(n)}")
         else:
-            if o["person"]:
-                notes[o["person"]].append("➖ حذف شد: " + fmt_entry(o))
-            if n["person"]:
-                notes[n["person"]].append("➕ اضافه شد: " + fmt_entry(n))
+            for person in split_people(o["person"]):
+                notes[person].append("➖ حذف شد: " + fmt_entry(o))
+            for person in split_people(n["person"]):
+                notes[person].append("➕ اضافه شد: " + fmt_entry(n))
     return notes
 
 
 # ---------- آزاد بودن ----------
 def free_staff(staff, entries, day, s, e):
     """(آزاد در بازه ولی آن روز شیفت دارند، آن روز اصلاً شیفت ندارند، مشغول در بازه)."""
+    from schedule_parser import split_people
+
     todays = [x for x in entries if x["day"] == day and x["person"]]
-    works = {x["person"] for x in todays}
-    busy = {x["person"] for x in todays if x["start_min"] < e and s < x["end_min"]}
+    works = {name for entry in todays for name in split_people(entry["person"])}
+    busy = {name for x in todays if x["start_min"] < e and s < x["end_min"]
+            for name in split_people(x["person"])}
     free_working = sorted((p for p in staff if p["name"] in works and p["name"] not in busy),
                           key=lambda p: p["name"])
     off = sorted((p for p in staff if p["name"] not in works), key=lambda p: p["name"])
@@ -335,7 +344,8 @@ def stats(entries):
             studio[name][0] += d
             studio[name][1] += 1
         if e["person"]:
-            admin[e["person"]][e["kind"]] += d
+            for person in split_people(e["person"]):
+                admin[person][e["kind"]] += d
     studios = sorted(((n, v[0], v[1]) for n, v in studio.items()), key=lambda x: (-x[1], x[0]))
     admins = sorted(({"person": p, **v, "total": sum(v.values())} for p, v in admin.items()),
                     key=lambda x: (-x["total"], x["person"]))

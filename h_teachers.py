@@ -1,5 +1,4 @@
 """اطلاع‌رسانی سرپرست‌ها به گروه اساتید."""
-import re
 import time
 from collections import defaultdict
 from datetime import timedelta
@@ -9,7 +8,7 @@ from telebot import types
 
 import db
 from analysis import day_label, now_tehran, sort_entries, span, text_line, today_tomorrow
-from app import BTN_NOTIFY, BOT_MANAGER, SUP, bot, send, staff_only
+from app import BTN_NOTIFY, BOT_MANAGER, SUP, bot, send, staff_context, staff_only
 from analysis import resolve_day
 from schedule_parser import key, normalize
 
@@ -45,6 +44,9 @@ def build_batches(s, day, label=None, target_date=None):
         assignment = assignments.get(k)
         if s["role"] == SUP and (not assignment or assignment["supervisor"] != s["name"]):
             continue
+        if s.get("_admin_mode") and (
+                not assignment or assignment["supervisor"] != s.get("supervisor")):
+            continue
         group = groups.get(k)
         if not assignment or not (assignment["telegram_id"] or assignment["username"]) or not group:
             no_group.append(teacher)
@@ -53,27 +55,6 @@ def build_batches(s, day, label=None, target_date=None):
                      compose(teacher, assignment["username"], day, items, label, target_date,
                              assignment["telegram_id"])))
     return msgs, sorted(no_group)
-
-
-@bot.message_handler(commands=["assignteacher"], chat_types=["private"])
-@staff_only(BOT_MANAGER)
-def assign_teacher(m, s):
-    parts = [normalize(part).strip() for part in m.text.partition(" ")[2].split("|")]
-    if len(parts) != 3 or not parts[0] or not parts[1] or not parts[2]:
-        send(m.chat.id, "مثال: /assignteacher نام استاد | نام سرپرست | @username")
-        return
-    teacher, supervisor_name, username = parts
-    supervisor = db.get_staff_by_name(supervisor_name)
-    username = username.removeprefix("@")
-    if not supervisor or supervisor["role"] != SUP:
-        send(m.chat.id, f"«{supervisor_name}» سرپرست ثبت‌شده نیست.")
-        return
-    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", username):
-        send(m.chat.id, "نام کاربری تلگرام معتبر نیست؛ مثل @teacher_name واردش کن.")
-        return
-    db.assign_teacher(teacher, supervisor["name"], username)
-    db.add_known("teacher", [teacher])
-    send(m.chat.id, f"✅ استاد «{teacher}» به سرپرستی {supervisor['name']} ثبت شد؛ اعلان‌ها با @{username} منشن می‌شوند.")
 
 
 @bot.message_handler(commands=["linkteacher"], chat_types=["group", "supergroup"])
@@ -86,9 +67,10 @@ def link(m, s):
         return
     assignment = db.get_teacher_assignment(name)
     if not assignment:
-        send(m.chat.id, "این استاد هنوز توسط مدیر ربات به سرپرست و نام کاربری تلگرام وصل نشده.")
+        send(m.chat.id, "این استاد هنوز در پنل «مدیریت استادها» ثبت نشده است.")
         return
-    if s["role"] == SUP and assignment["supervisor"] != s["name"]:
+    if (s["role"] == SUP and assignment["supervisor"] != s["name"]) or (
+            s.get("_admin_mode") and assignment["supervisor"] != s.get("supervisor")):
         send(m.chat.id, "فقط سرپرست همان استاد یا مدیر ربات می‌تواند گروهش را ثبت کند.")
         return
     db.link_teacher(assignment["teacher"], m.chat.id, assignment["supervisor"])
@@ -112,7 +94,8 @@ def register_teacher(m, s):
     if not assignment:
         send(m.chat.id, "این استاد هنوز به سرپرست تخصیص داده نشده؛ مدیر ربات باید ثبتش کند.")
         return
-    if s["role"] == SUP and assignment["supervisor"] != s["name"]:
+    if (s["role"] == SUP and assignment["supervisor"] != s["name"]) or (
+            s.get("_admin_mode") and assignment["supervisor"] != s.get("supervisor")):
         send(m.chat.id, "فقط سرپرست همان استاد یا مدیر ربات می‌تواند شناسه‌اش را ثبت کند.")
         return
     if not db.set_teacher_telegram_id(assignment["teacher"], teacher_user.id):
@@ -132,13 +115,13 @@ def groups(m, s):
     if s["role"] == SUP:
         gs = [g for g in gs if g["supervisor"] == s["name"]]
         assignments = [a for a in assignments if a["supervisor"] == s["name"]]
+    elif s.get("_admin_mode"):
+        gs = [g for g in gs if g["supervisor"] == s["supervisor"]]
+        assignments = [a for a in assignments if a["supervisor"] == s["supervisor"]]
     linked = {g["teacher_key"] for g in db.list_teacher_groups()}
     missing = sorted(a["teacher"] for a in assignments if a["teacher_key"] not in linked)
-    t = "\n".join(f"• {g['teacher']}" + (f" ← {g['supervisor']}" if g["supervisor"] else "") for g in gs) or "—"
-    assigned = "\n".join(
-        f"• {a['teacher']} — {a['supervisor']} — @{a['username'] or 'نام کاربری ثبت نشده'}"
-        for a in assignments
-    ) or "—"
+    t = "\n".join(f"• {g['teacher']}" for g in gs) or "—"
+    assigned = "\n".join(f"• {a['teacher']}" for a in assignments) or "—"
     send(m.chat.id, f"🔗 گروه‌های وصل‌شده ({len(gs)}):\n{t}\n\n"
                     f"👩‍🏫 استادهای تخصیص‌یافته ({len(assignments)}):\n{assigned}\n\n"
                     "❓ استادهای تخصیص‌یافته که گروه ندارند:\n" + ("، ".join(missing) or "—"))
@@ -148,7 +131,7 @@ def _start_notify(m, s, day, label, target_date=None):
     msgs, no_group = build_batches(s, day, label, target_date)
     if not msgs:
         send(m.chat.id, f"برای {day} پیامی برای ارسال نیست." +
-             (f"\nبدون تخصیص، نام کاربری یا گروه: {'، '.join(no_group)}" if no_group else ""))
+             (f"\nبدون تخصیص، ثبت شناسه‌ی تلگرام یا گروه: {'، '.join(no_group)}" if no_group else ""))
         return
     pending[m.from_user.id] = msgs
     kb = types.InlineKeyboardMarkup()
@@ -159,7 +142,8 @@ def _start_notify(m, s, day, label, target_date=None):
     date_label = day_label(day, shift_date)
     send(m.chat.id, f"📣 کلاس‌های {label or day} ({date_label}) به {len(msgs)} گروه استاد ارسال می‌شود:\n"
          + escape("، ".join(t for _, t, _ in msgs))
-         + (f"\n\n⚠️ بدون تخصیص، نام کاربری یا گروه (پیام نمی‌رود): {escape('، '.join(no_group))}" if no_group else ""),
+         + (f"\n\n⚠️ بدون تخصیص، ثبت شناسه‌ی تلگرام یا گروه (پیام نمی‌رود): "
+            f"{escape('، '.join(no_group))}" if no_group else ""),
          reply_markup=kb, parse_mode="HTML")
 
 
@@ -189,6 +173,8 @@ def on_notify(c):
         send(chat, "لغو شد." if c.data == "nt:no" else "این درخواست منقضی شده؛ دوباره بزن.")
         return
     staff = db.get_staff_by_tid(c.from_user.id)
+    if staff:
+        staff = staff_context(staff)
     if not staff or staff["role"] not in (SUP, BOT_MANAGER):
         send(chat, "اجازه‌ی ارسال این اعلان را نداری.")
         return
@@ -201,7 +187,10 @@ def on_notify(c):
         group = groups.get(teacher_key)
         if (not assignment or not group or group["chat_id"] != chat_id
                 or not (assignment["telegram_id"] or assignment["username"])
-                or (staff["role"] == SUP and assignment["supervisor"] != staff["name"])):
+                or (staff["role"] == SUP and assignment["supervisor"] != staff["name"])
+                or (staff["role"] == BOT_MANAGER
+                    and db.get_setting(f"manager_mode:{staff['telegram_id']}") == "admin"
+                    and assignment["supervisor"] != staff["supervisor"])):
             fail.append(teacher)
             continue
         if send(chat_id, text, parse_mode="HTML"):
