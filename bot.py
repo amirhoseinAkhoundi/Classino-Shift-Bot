@@ -1,7 +1,10 @@
 """ربات شیفت کلاسینو — نقطه‌ی ورود."""
 import logging
 import os
+<<<<<<< HEAD
 import threading
+=======
+>>>>>>> 26302003ef5564c4cc36eabf0111d0be5136abcc
 
 import app  # noqa: F401  (لاگ، پروکسی و نمونه‌ی بات)
 import config
@@ -9,7 +12,11 @@ import db
 
 from daily_notifications import run_daily_notifications
 # ترتیب import = اولویت هندلرها؛ h_schedule (هندلر عمومیِ متن) باید آخر باشد
+<<<<<<< HEAD
 import h_staff, h_manage, h_teachers, h_ops, h_admin, h_broadcast, h_teacherphone, h_schedule # noqa: E401,F401
+=======
+import h_staff, h_manage, h_teachers, h_ops, h_admin, h_schedule  # noqa: E401,F401
+>>>>>>> 26302003ef5564c4cc36eabf0111d0be5136abcc
 
 
 def load_staff():
