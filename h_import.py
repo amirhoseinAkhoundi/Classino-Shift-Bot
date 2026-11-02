@@ -7,7 +7,7 @@ import db
 from app import OWNER_TELEGRAM_ID, bot, normalize_phone, send
 from schedule_parser import normalize
 
-ROLES = {"shift_manager", "supervisor", "admin", "bot_manager"}
+ROLES = {"shift_manager", "supervisor", "admin", "bot_manager", "company_manager"}
 
 
 @bot.message_handler(content_types=["document"], chat_types=["private"])
@@ -29,13 +29,14 @@ def on_document(m):
 
     ok, bad = 0, []
     for i, r in enumerate(csv.DictReader(io.StringIO(text), delimiter=delim), start=2):
-        r = {(k or "").strip().lower(): (v.strip() if isinstance(v, str) else "")
+        r = {(k or "").strip().lower(): (v if (k or "").strip().lower() == "phone"
+                                         else v.strip() if isinstance(v, str) else "")
              for k, v in r.items()}
         name = normalize(r.get("name", "")).strip()
         phone = normalize_phone(r.get("phone", ""))
         role = r.get("role", "")
         sup = normalize(r.get("supervisor", "")).strip()
-        if not name or len(phone) != 10 or role not in ROLES:
+        if not name or not phone.strip() or role not in ROLES:
             bad.append(f"ردیف {i}: {name or '؟'}")
             continue
         try:

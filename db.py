@@ -9,8 +9,8 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS staff (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,        -- دقیقاً همان‌طور که در برنامه نوشته می‌شود
-    phone TEXT UNIQUE,                -- ۱۰ رقم آخر، مثل 9121234567
-    role TEXT NOT NULL,               -- shift_manager | supervisor | admin | bot_manager | teacher
+    phone TEXT UNIQUE,                -- رشته‌ی اصلی شماره، بدون تبدیل
+    role TEXT NOT NULL,               -- shift_manager | supervisor | admin | bot_manager | company_manager | teacher
     supervisor TEXT,                  -- نام سرپرست این عضو تیم
     telegram_id INTEGER UNIQUE,       -- بعد از تایید هویت پر می‌شود
     verified_at TEXT
@@ -247,7 +247,19 @@ def delete_staff(staff_id):
 
 def find_staff_by_phone(phone):
     with connect() as c:
-        return c.execute("SELECT * FROM staff WHERE phone=?", (phone,)).fetchone()
+        rows = c.execute("SELECT * FROM staff ORDER BY id").fetchall()
+    def digits(value):
+        return "".join(ch for ch in normalize(value or "") if ch.isdigit())
+    phone_digits = digits(phone)
+    if not phone_digits:
+        return None
+    phone_suffix = phone_digits[-10:]
+    exact = next((row for row in rows if row["phone"] == phone), None)
+    if exact or len(phone_digits) < 10:
+        return exact
+    return next((row for row in rows
+                 if len(digits(row["phone"])) >= 10
+                 and digits(row["phone"])[-10:] == phone_suffix), None)
 
 
 def set_teacher_contact(teacher, phone, supervisor):

@@ -8,7 +8,7 @@ import db
 
 from daily_notifications import run_daily_notifications
 # ترتیب import = اولویت هندلرها؛ h_schedule (هندلر عمومیِ متن) باید آخر باشد
-import h_staff, h_manage, h_teachers, h_ops, h_admin, h_broadcast, h_teacherphone, h_schedule # noqa: E401,F401
+import h_staff, h_manage, h_teachers, h_ops, h_admin, h_broadcast, h_teacherphone, h_company_manager, h_schedule # noqa: E401,F401
 import h_staff, h_manage, h_teachers, h_ops, h_admin, h_schedule  # noqa: E401,F401
 
 

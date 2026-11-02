@@ -224,9 +224,9 @@ def test_roles_now_and_incident_text(env):
     db.assign_teacher(opt["entry"]["teacher"], "فرستنده", "teacher")
     db.set_teacher_telegram_id(opt["entry"]["teacher"], 404)
     text = h_ops.compose_incident(db.get_staff_by_name("وحید"), opt, "🔊 صدا", True, nazers, True, helpers, True)
-    assert "🚨" in text and "09120000003" in text
+    assert "🚨" in text and "9120000003" in text
     assert f'<a href="tg://user?id=404">{opt["entry"]["teacher"]}</a>' in text
-    assert '<a href="tg://user?id=6">اشتری</a> (09120000006)' in text and "نیاز به کمک" in text
+    assert '<a href="tg://user?id=6">اشتری</a> (9120000006)' in text and "نیاز به کمک" in text
 
 
 def test_helper_is_unavailable_around_their_class_without_a_conflict(env):
@@ -325,7 +325,9 @@ def test_help_fallback_group_message_only_names_requester(env, monkeypatch):
     h_ops.S[3] = {"opt": h_ops._opts_from(mine)[0]}
     h_ops.finish_help(2, 3, db.get_staff_by_tid(3))
     assert len(group_messages) == 1
-    assert "می‌تونی بری طوسی2 کمک" in group_messages[0]
+    assert "می‌تونی بری کمک" in group_messages[0]
+    assert '<a href="tg://user?id=3">وحید</a>' in group_messages[0]
+    assert "طوسی2" not in group_messages[0]
     assert '<a href="tg://user?id=3">وحید</a>' in group_messages[0]
     assert "اشتری" in group_messages[0]
     assert "09120000003" not in group_messages[0]
@@ -342,7 +344,7 @@ def test_stats_on_sample(env):
 def test_staff_csv_seed(env, tmp_path):
     from scripts.seed_staff import seed
     p = tmp_path / "staff.csv"
-    p.write_text("name,phone,role,supervisor\nآخوندی,09129271665,shift_manager,\n\nبد,123,admin,\n", encoding="utf-8-sig")
+    p.write_text("name,phone,role,supervisor\nآخوندی,09129271665,shift_manager,\n\nبد,,admin,\n", encoding="utf-8-sig")
     assert seed(str(p)) == 1
     assert db.find_staff_by_phone("9129271665")["role"] == "shift_manager"
 

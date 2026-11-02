@@ -53,13 +53,3 @@ def build_studios_xlsx(entries, path):
            [[name, float(hours(minutes)), count] for name, minutes, count in studios], first=True)
     wb.save(path)
     return path
-
-
-def build_admins_xlsx(entries, path):
-    _, admins = stats(entries)
-    wb = Workbook()
-    _sheet(wb, "ادمین‌ها", ["نام", "ساعت کلاس", "ساعت نظارت", "ساعت کمکی", "جمع ساعت"],
-           [[a["person"], float(hours(a["class"])), float(hours(a["nazer"])), float(hours(a["komaki"])),
-             float(hours(a["total"]))] for a in admins], first=True)
-    wb.save(path)
-    return path

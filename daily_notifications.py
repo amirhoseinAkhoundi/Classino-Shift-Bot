@@ -5,7 +5,7 @@ from html import escape
 
 import db
 from analysis import day_label, day_of, entry_line, now_tehran, sort_entries
-from app import TEACHER, daily_notifications_enabled, send, staff_context
+from app import COMPANY_MANAGER, TEACHER, daily_notifications_enabled, send, staff_context
 
 
 def send_daily_notifications(target_date=None):
@@ -15,7 +15,8 @@ def send_daily_notifications(target_date=None):
 
     for staff in db.list_staff():
         telegram_id = staff["telegram_id"]
-        if not telegram_id or not daily_notifications_enabled(staff["id"]):
+        if (not telegram_id or staff["role"] == COMPANY_MANAGER
+                or not daily_notifications_enabled(staff["id"])):
             continue
         sent_key = f"daily_notifications_sent:{staff['id']}"
         if db.get_setting(sent_key) == target_date:

@@ -96,7 +96,7 @@ def teacherphone_command(m, staff):
 
     # نمایش شماره استاد
     teacher_name = escape(assignment["teacher"])
-    phone = escape("0" + assignment["phone"])
+    phone = escape(assignment["phone"])
 
     send(
         m.chat.id,

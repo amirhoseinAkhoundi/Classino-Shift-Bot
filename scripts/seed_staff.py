@@ -9,14 +9,13 @@ import tempfile
 import db
 from schedule_parser import key, normalize
 
-ROLES = {"shift_manager", "supervisor", "admin", "bot_manager"}
+ROLES = {"shift_manager", "supervisor", "admin", "bot_manager", "company_manager"}
 CSV_FIELDS = ("name", "phone", "role", "supervisor")
 DEFAULT_CSV_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "staff.csv")
 
 
-def phone10(p):
-    return "".join(c for c in normalize(p or "") if c.isdigit())[-10:]
-
+def phone_value(p):
+    return p or ""
 
 def read_staff_csv(path=DEFAULT_CSV_PATH):
     if not os.path.exists(path):
@@ -27,7 +26,8 @@ def read_staff_csv(path=DEFAULT_CSV_PATH):
         missing = set(CSV_FIELDS) - set(fields)
         if missing:
             raise ValueError(f"ستون‌های لازم در staff.csv نیستند: {', '.join(sorted(missing))}")
-        rows = [{field: (row.get(field) or "").strip() for field in fields} for row in reader]
+        rows = [{field: ((row.get(field) or "") if field == "phone"
+                         else (row.get(field) or "").strip()) for field in fields} for row in reader]
     return fields, rows
 
 
@@ -49,11 +49,12 @@ def write_staff_csv(fields, rows, path=DEFAULT_CSV_PATH):
 
 def save_staff_csv(record, path=DEFAULT_CSV_PATH, previous=None):
     fields, rows = read_staff_csv(path)
-    record = {field: (record.get(field) or "").strip() for field in CSV_FIELDS}
-    old_phone = phone10(previous.get("phone")) if previous else ""
+    record = {field: ((record.get(field) or "") if field == "phone"
+                      else (record.get(field) or "").strip()) for field in CSV_FIELDS}
+    old_phone = phone_value(previous.get("phone")) if previous else ""
     old_name = key(normalize(previous.get("name", ""))) if previous else ""
     match_index = next(
-        (i for i, row in enumerate(rows) if old_phone and phone10(row.get("phone")) == old_phone),
+        (i for i, row in enumerate(rows) if old_phone and phone_value(row.get("phone")) == old_phone),
         None,
     )
     if match_index is None and old_name:
@@ -61,12 +62,12 @@ def save_staff_csv(record, path=DEFAULT_CSV_PATH, previous=None):
             (i for i, row in enumerate(rows) if key(normalize(row.get("name", ""))) == old_name),
             None,
         )
-    new_phone = phone10(record["phone"])
+    new_phone = phone_value(record["phone"])
     new_name = key(normalize(record["name"]))
     for i, row in enumerate(rows):
         if i == match_index:
             continue
-        if phone10(row.get("phone")) == new_phone or key(normalize(row.get("name", ""))) == new_name:
+        if phone_value(row.get("phone")) == new_phone or key(normalize(row.get("name", ""))) == new_name:
             raise ValueError("نام یا شماره‌ی پرسنل دیگری تکراری است.")
     if match_index is None:
         rows.append(record)
@@ -77,10 +78,10 @@ def save_staff_csv(record, path=DEFAULT_CSV_PATH, previous=None):
 
 def remove_staff_csv(record, path=DEFAULT_CSV_PATH):
     fields, rows = read_staff_csv(path)
-    phone = phone10(record.get("phone"))
+    phone = phone_value(record.get("phone"))
     name = key(normalize(record.get("name", "")))
     match_index = next(
-        (i for i, row in enumerate(rows) if phone and phone10(row.get("phone")) == phone),
+        (i for i, row in enumerate(rows) if phone and phone_value(row.get("phone")) == phone),
         None,
     )
     if match_index is None and name:
@@ -109,7 +110,9 @@ def seed(path):
     ok = 0
     with open(path, encoding="utf-8-sig", newline="") as f:
         for i, row in enumerate(csv.DictReader(f), start=2):
-            row = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
+            row = {(k or "").strip().lower(): ((v or "") if (k or "").strip().lower() == "phone"
+                                               else (v or "").strip())
+                   for k, v in row.items()}
             name, role = normalize(row.get("name", "")), row.get("role", "")
             if role == "observer":
                 role = "supervisor"
@@ -117,11 +120,12 @@ def seed(path):
                 role = "bot_manager"
             if not name and not row.get("phone"):
                 continue  # ردیف خالی
-            if not name or role not in ROLES or len(phone10(row.get("phone"))) != 10:
+            phone = phone_value(row.get("phone"))
+            if not name or not phone.strip() or role not in ROLES:
                 logging.warning("staff.csv خط %s نامعتبر است (name/phone/role): %s", i, row)
                 continue
             try:
-                db.upsert_staff(name, phone10(row["phone"]), role, normalize(row.get("supervisor", "")) or None)
+                db.upsert_staff(name, phone, role, normalize(row.get("supervisor", "")) or None)
                 ok += 1
             except Exception as e:  # noqa  (مثلاً شماره‌ی تکراری)
                 logging.warning("staff.csv خط %s ثبت نشد: %s", i, e)

@@ -12,15 +12,16 @@ import db
 from analysis import (by_day_text, day_block, day_label, entry_line, free_staff, hours, now_tehran,
                      jalali_day_month, reporting_period, resolve_day,
                      sort_entries, stats, today_tomorrow)
-from app import (ADMIN, ADMIN_ROLES, BTN_FREE, BTN_STATS, BTN_TEAM, BOT_MANAGER, MANAGER, ROLE_FA, SUP, bot,
-                 phone_display, staff_role_label, BTN_STAFF_MANAGEMENT, menu_for, normalize_phone, send,
+from app import (ADMIN, ADMIN_ROLES, BTN_FREE, BTN_STATS, BTN_TEAM, BOT_MANAGER, COMPANY_MANAGER, MANAGER,
+                 ROLE_FA, SUP, bot,
+                 phone_display, staff_role_label, BTN_STAFF_MANAGEMENT, menu_for, send,
                  staff_only)
-from reports import build_admins_xlsx, build_studios_xlsx
+from reports import build_studios_xlsx
 from schedule_parser import (DAYS, apply_helper_class_buffers, key, normalize, parse_range,
                              fmt_min, person_matches, split_people)
 from scripts import seed_staff as staff_csv
 
-ROLES_OK = {MANAGER, SUP, ADMIN, BOT_MANAGER}
+ROLES_OK = {MANAGER, SUP, ADMIN, BOT_MANAGER, COMPANY_MANAGER}
 MANAGEMENT_ROLES = (MANAGER, SUP, BOT_MANAGER)
 FULL_ACCESS_ROLES = (MANAGER, BOT_MANAGER)
 STAFF_ADMINS_PENDING = {}
@@ -244,23 +245,12 @@ def free_time_input(m):
 @bot.message_handler(func=lambda m: m.text == BTN_STATS, chat_types=["private"])
 @staff_only(*MANAGEMENT_ROLES)
 def stats_cmd(m, s):
+    if not full_access(s):
+        send(m.chat.id, "گزارش آمار برای شما در دسترس نیست.")
+        return
     kb = types.InlineKeyboardMarkup()
-    if full_access(s):
-        kb.row(types.InlineKeyboardButton("🏢 گزارش استودیوها", callback_data="stats:studios"))
-    kb.row(types.InlineKeyboardButton("👤 گزارش ادمین‌ها", callback_data="stats:admins"))
+    kb.row(types.InlineKeyboardButton("🏢 گزارش استودیوها", callback_data="stats:studios"))
     send(m.chat.id, "کدوم گزارش رو می‌خوای؟", reply_markup=kb)
-
-
-def _admin_report_entries(s, entries):
-    s = dict(s)
-    if (s["role"] == BOT_MANAGER
-            and db.get_setting(f"manager_mode:{s['telegram_id']}") == "admin"):
-        s["_admin_mode"] = True
-    admins = {person["name"] for person in db.list_staff(roles=ADMIN_ROLES)}
-    if s["role"] == SUP or s.get("_admin_mode"):
-        admins &= {person["name"] for person in team_of(s)}
-    return entries_for_names(entries, admins)
-
 
 def _send_report_file(chat, uid, builder, caption, filename, entries):
     path = os.path.join(tempfile.gettempdir(), f"stats_{uid}.xlsx")
@@ -296,7 +286,7 @@ def stats_report(c):
     if not staff or staff["role"] not in MANAGEMENT_ROLES or is_admin_mode(staff):
         return
     parts = c.data.split(":")
-    if len(parts) == 2 and parts[1] in ("studios", "admins"):
+    if len(parts) == 2 and parts[1] == "studios":
         report = parts[1]
         if report == "studios" and not full_access(staff):
             send(c.message.chat.id, "گزارش استودیوها فقط برای مسئول شیفت و مدیر ربات در دسترسه.")
@@ -305,7 +295,7 @@ def stats_report(c):
         send(c.message.chat.id, "بازه‌ی گزارش را انتخاب کن:",
              reply_markup=_stats_period_keyboard(report))
         return
-    if len(parts) != 4 or parts[1] != "run" or parts[2] not in ("studios", "admins") \
+    if len(parts) != 4 or parts[1] != "run" or parts[2] != "studios" \
             or parts[3] not in ("week", "month", "all"):
         return
     report, period = parts[2], parts[3]
@@ -342,23 +332,6 @@ def stats_report(c):
                           f"استفاده از استودیوها — {period_label}",
                           f"classino-studios-{filename_suffix}.xlsx", entries)
         return
-    if report == "admins":
-        entries = _admin_report_entries(staff, entries)
-        if not entries:
-            send(c.message.chat.id, "برای ادمین‌های مجاز در این بازه برنامه‌ای ثبت نشده.")
-            return
-        _, admins = stats(entries)
-        scope = " (فقط ادمین‌های تیم شما)" if staff["role"] == SUP else ""
-        lines = "\n".join(f"• {a['person']}: {hours(a['total'])} ساعت"
-                          f" (کلاس {hours(a['class'])} | نظارت {hours(a['nazer'])} | کمکی {hours(a['komaki'])})"
-                          for a in admins)
-        send(c.message.chat.id, f"👤 آمار ادمین‌ها{scope} — {period_label}:\n{lines}")
-        _send_report_file(c.message.chat.id, c.from_user.id, build_admins_xlsx,
-                          f"آمار ادمین‌ها — {period_label}",
-                          f"classino-admins-{filename_suffix}.xlsx", entries)
-        return
-
-
 # ---------- تیم و جست‌وجو ----------
 @bot.message_handler(commands=["team"], chat_types=["private"])
 @bot.message_handler(func=lambda m: m.text == BTN_TEAM, chat_types=["private"])
@@ -472,9 +445,10 @@ def _staff_categories_keyboard():
         ADMIN: "ادمین‌ها",
         SUP: "سرپرست‌ها",
         MANAGER: "مسئول‌های شیفت",
+        COMPANY_MANAGER: "مدیران مجموعه",
     }
     kb = types.InlineKeyboardMarkup()
-    for role in (ADMIN, SUP, MANAGER):
+    for role in (ADMIN, SUP, MANAGER, COMPANY_MANAGER):
         roles = ADMIN_ROLES if role == ADMIN else (role,)
         count = len(db.list_staff(roles=roles))
         kb.row(types.InlineKeyboardButton(
@@ -489,9 +463,10 @@ def _staff_role_keyboard(prefix):
         SUP: "سرپرست",
         MANAGER: "مسئول شیفت",
         BOT_MANAGER: "مدیر ربات",
+        COMPANY_MANAGER: "مدیر",
     }
     kb = types.InlineKeyboardMarkup()
-    for role in (ADMIN, SUP, MANAGER, BOT_MANAGER):
+    for role in (ADMIN, SUP, MANAGER, BOT_MANAGER, COMPANY_MANAGER):
         kb.row(types.InlineKeyboardButton(labels[role], callback_data=f"{prefix}:{role}"))
     kb.row(types.InlineKeyboardButton("❌ لغو", callback_data="staffm:cancel"))
     return kb
@@ -528,11 +503,11 @@ def _save_staff(data, staff_id=None):
     snapshot = _staff_snapshot()
     record = {
         "name": normalize(data["name"]).strip(),
-        "phone": normalize_phone(data["phone"]),
+        "phone": data["phone"],
         "role": data["role"],
         "supervisor": normalize(data.get("supervisor") or "").strip(),
     }
-    if not record["name"] or len(record["phone"]) != 10 or record["role"] not in ROLES_OK:
+    if not record["name"] or not record["phone"].strip() or record["role"] not in ROLES_OK:
         raise ValueError("نام، شماره یا سمت معتبر نیست.")
     staff_csv.save_staff_csv(record, STAFF_CSV_PATH, previous=old)
     try:
@@ -823,7 +798,8 @@ def staff_management_input(m):
         STAFF_MANAGEMENT_PENDING.pop(m.from_user.id, None)
         send(m.chat.id, "این مرحله لغو شد یا دسترسی شما تغییر کرده است.")
         return
-    text = normalize(m.text).strip()
+    raw_text = m.text
+    text = normalize(raw_text).strip()
     if text in ("❌ لغو", "/cancel"):
         STAFF_MANAGEMENT_PENDING.pop(m.from_user.id, None)
         send(m.chat.id, "لغو شد.", reply_markup=types.ReplyKeyboardRemove())
@@ -840,9 +816,9 @@ def staff_management_input(m):
         if state["step"] != "phone":
             send(m.chat.id, "از دکمه‌های مرحله‌ی فعلی استفاده کن یا «لغو» را بزن.")
             return
-        phone = normalize_phone(text)
-        if len(phone) != 10:
-            send(m.chat.id, "شماره معتبر نیست؛ شماره‌ی موبایل ۱۱ رقمی را دوباره وارد کن:")
+        phone = raw_text
+        if not phone.strip():
+            send(m.chat.id, "شماره نمی‌تواند خالی باشد؛ دوباره وارد کن:")
             return
         state["data"]["phone"] = phone
         if state["data"]["role"] == ADMIN:
@@ -859,9 +835,9 @@ def staff_management_input(m):
                 return
             state["data"]["name"] = text
         else:
-            phone = normalize_phone(text)
-            if len(phone) != 10:
-                send(m.chat.id, "شماره معتبر نیست؛ شماره‌ی موبایل ۱۱ رقمی را دوباره وارد کن:")
+            phone = raw_text
+            if not phone.strip():
+                send(m.chat.id, "شماره نمی‌تواند خالی باشد؛ دوباره وارد کن:")
                 return
             state["data"]["phone"] = phone
         _finish_staff_operation(m.from_user.id, state)

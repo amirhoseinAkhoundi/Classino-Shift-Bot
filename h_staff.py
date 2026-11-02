@@ -7,7 +7,7 @@ import db
 from analysis import (day_label, entry_line, fmt_entry, next_weekday_on_or_after,
                       now_tehran, span, today_tomorrow)
 from app import (ADMIN, BTN_DAILY_NOTIFICATIONS, BTN_MODE, BTN_MODE_ADMIN, BTN_MY, BTN_TEACHER_ADMIN,
-                 BTN_TEACHER_CLASSES, BOT_MANAGER, MANAGER, ROLE_FA, SUP, TEACHER, bot,
+                 BTN_TEACHER_CLASSES, BOT_MANAGER, COMPANY_MANAGER, MANAGER, ROLE_FA, SUP, TEACHER, bot,
                  daily_notifications_enabled, menu_for, normalize_phone, phone_display,
                  staff_role_label, send, staff_context, staff_only)
 from schedule_parser import DAYS, key, normalize, split_people
@@ -35,6 +35,9 @@ HELP = {
                   "👩‍🏫 تخصیص و ویرایش استادها از دکمه‌ی «مدیریت استادها»\n"
                   "🔗 در گروه استاد: /linkteacher نام استاد\n"
                   "روی پیام استاد ریپلای کن و /registerteacher بزن."),
+    COMPANY_MANAGER: ("دکمه‌ی «📅 برنامه‌ی کامل امروز» آخرین برنامه‌ی کامل ثبت‌شده برای امروز را "
+                      "نشان می‌دهد. از «🔎 جستجوی استاد» برنامه‌ی امروز و هفته، موقعیت فعلی و شماره‌ی "
+                      "استاد را ببین؛ «📞 فهرست شماره اساتید» برای فهرست یا جستجوی شماره است."),
 }
 
 BASE_COMMANDS = [
@@ -63,6 +66,8 @@ def _show_commands(chat_id, role):
         role = ADMIN
     if role == TEACHER:
         commands = [("my", "کلاس‌های من")]
+    elif role == COMPANY_MANAGER:
+        commands = [("help", "راهنمای مدیر مجموعه")]
     else:
         commands = list(BASE_COMMANDS)
         if role == SUP:
@@ -107,7 +112,7 @@ def myid(m):
 
 
 @bot.message_handler(commands=["help"], chat_types=["private"])
-@staff_only(ADMIN, SUP, MANAGER, BOT_MANAGER)
+@staff_only(ADMIN, SUP, MANAGER, BOT_MANAGER, COMPANY_MANAGER)
 def help_(m, s):
     send(m.chat.id, HELP.get(s["role"], HELP[ADMIN]))
 

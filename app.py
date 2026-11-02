@@ -12,9 +12,9 @@ import db
 from schedule_parser import normalize
 
 MANAGER, SUP, ADMIN, BOT_MANAGER = "shift_manager", "supervisor", "admin", "bot_manager"
-TEACHER = "teacher"
+TEACHER, COMPANY_MANAGER = "teacher", "company_manager"
 ROLE_FA = {MANAGER: "مسئول شیفت", SUP: "سرپرست", ADMIN: "ادمین",
-           BOT_MANAGER: "مدیر ربات", TEACHER: "استاد"}
+           BOT_MANAGER: "مدیر ربات", TEACHER: "استاد", COMPANY_MANAGER: "مدیر"}
 ADMIN_ROLES = (ADMIN, BOT_MANAGER)
 
 
@@ -41,6 +41,9 @@ BTN_MODE = "🔄 تغییر حالت: مدیر ربات"
 BTN_MODE_ADMIN = "🛡 تغییر حالت: ادمین"
 BTN_NOTIFY = "📣 اطلاع به اساتید"
 BTN_TEACHER_PHONES = "📞 شماره تماس اساتید"
+BTN_COMPANY_TODAY = "📅 برنامه‌ی کامل امروز"
+BTN_COMPANY_TEACHER = "🔎 جستجوی استاد"
+BTN_COMPANY_PHONES = "📞 فهرست شماره اساتید"
 BTN_BROADCAST = "📨 پیام به کاربران"
 OWNER_TELEGRAM_ID = 309425613
 
@@ -112,7 +115,7 @@ def staff_context(staff):
     value = dict(staff)
     if value["role"] in (ADMIN, TEACHER):
         assignment = db.get_teacher_assignment(value["name"])
-        if assignment and assignment.get("phone") and assignment["phone"] == value.get("phone"):
+        if assignment and assignment.get("phone") == value.get("phone"):
             value["role"] = TEACHER
     admin_mode = (staff["role"] == BOT_MANAGER
                   and db.get_setting(f"manager_mode:{staff['telegram_id']}") == "admin")
@@ -131,11 +134,11 @@ def can_post(user_id) -> bool:
 
 # ---------- ابزار ----------
 def normalize_phone(p: str) -> str:
-    return "".join(ch for ch in normalize(p) if ch.isdigit())[-10:]
+    return p
 
 
 def phone_display(s) -> str:
-    return ("0" + s["phone"]) if s and s["phone"] else "—"
+    return (s["phone"]) if s and s["phone"] else "—"
 
 
 def phone_of(name) -> str:
@@ -151,17 +154,21 @@ def menu_for(s):
     s = staff_context(s) if not s.get("_admin_mode") else s
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     mode = bool(s.get("_admin_mode"))
-    rows = ([(BTN_TEACHER_CLASSES,), (BTN_TEACHER_ADMIN,)]
-            if s["role"] == TEACHER else [(BTN_MY,)])
-    notification_state = "روشن" if daily_notifications_enabled(s["id"]) else "خاموش"
-    rows.append((f"{BTN_DAILY_NOTIFICATIONS}: {notification_state}",))
-    rows.append((BTN_TEACHER_PHONES,))
+    if s["role"] == COMPANY_MANAGER:
+        rows = [(BTN_COMPANY_TODAY,), (BTN_COMPANY_TEACHER,), (BTN_COMPANY_PHONES,)]
+    else:
+        rows = ([(BTN_TEACHER_CLASSES,), (BTN_TEACHER_ADMIN,)]
+                if s["role"] == TEACHER else [(BTN_MY,)])
+        notification_state = "روشن" if daily_notifications_enabled(s["id"]) else "خاموش"
+        rows.append((f"{BTN_DAILY_NOTIFICATIONS}: {notification_state}",))
+        if s["role"] != TEACHER:
+            rows.append((BTN_TEACHER_PHONES,))
     if s["role"] != TEACHER:
         if mode or s["role"] == ADMIN:
             rows.append((BTN_PROBLEM, BTN_HELPER))
         elif s["role"] == SUP:
             rows.append((BTN_PROBLEM, BTN_HELPER))
-            rows.extend(((BTN_TEAM, BTN_NOTIFY), (BTN_FREE, BTN_STATS)))
+            rows.extend(((BTN_TEAM, BTN_NOTIFY), (BTN_FREE,)))
         elif s["role"] == BOT_MANAGER:
             rows.append((BTN_MODE_ADMIN,))
             rows.extend(((BTN_TEAM, BTN_NOTIFY), (BTN_FREE, BTN_STATS)))
@@ -175,7 +182,7 @@ def menu_for(s):
         rows.append((BTN_MODE,))
     if s["role"] in (MANAGER, BOT_MANAGER) and not mode:
         rows.append((BTN_STAFF_MANAGEMENT,))
-    if s["telegram_id"] == OWNER_TELEGRAM_ID and not mode:
+    if s["telegram_id"] == OWNER_TELEGRAM_ID and not mode and s["role"] != COMPANY_MANAGER:
         rows.extend(((BTN_SCHEDULE_DATES,), (BTN_TEACHER_MANAGEMENT, BTN_STUDIO_MANAGEMENT)))
     for row in rows:
         kb.row(*row)

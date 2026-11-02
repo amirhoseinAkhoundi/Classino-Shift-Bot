@@ -1,4 +1,5 @@
 name,phone,role,supervisor
+مدیر_مجموعه,09120000000,company_manager,
 مثال_مدیر,9120000001,bot_manager,
 مثال_مسئول,9120000002,shift_manager,
 مثال_سرپرست,9120000003,supervisor,

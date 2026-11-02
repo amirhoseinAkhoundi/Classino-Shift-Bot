@@ -15,7 +15,8 @@ import h_staff
 from app import (BTN_FREE, BTN_HELPER, BTN_MY, BTN_PROBLEM, BTN_SCHEDULE_DATES, BTN_STATS,
                  BTN_DAILY_NOTIFICATIONS, BTN_MODE, BTN_MODE_ADMIN, BTN_STAFF_MANAGEMENT,
                  BTN_TEACHER_MANAGEMENT, BTN_TEAM, BTN_STUDIO_MANAGEMENT, BTN_TEACHER_ADMIN,
-                 BTN_TEACHER_CLASSES, BOT_MANAGER, OWNER_TELEGRAM_ID, TEACHER, menu_for)
+                 BTN_TEACHER_CLASSES, BTN_COMPANY_PHONES, BTN_COMPANY_TEACHER, BTN_COMPANY_TODAY,
+                 BOT_MANAGER, COMPANY_MANAGER, OWNER_TELEGRAM_ID, TEACHER, menu_for)
 from tests.test_flow import SAMPLE, env  # noqa: F401
 
 _ids = itertools.count(1)
@@ -242,12 +243,12 @@ def test_teacher_can_look_up_class_admin_names_and_phones_by_day(live, monkeypat
         assert span(entry) in label
 
     app.bot.process_new_updates([callback(79, class_callbacks[0])])
-    assert "بابک — 09120000099" in sent[-1][1]
-    assert "احسانی — 09120000007" in sent[-1][1]
+    assert "بابک — 9120000099" in sent[-1][1]
+    assert "احسانی — 9120000007" in sent[-1][1]
     assert "ادمین(های) این کلاس:" in sent[-1][1]
 
     app.bot.process_new_updates([callback(79, class_callbacks[1])])
-    assert "احسانی — 09120000007" in sent[-1][1]
+    assert "احسانی — 9120000007" in sent[-1][1]
     assert "ادمین بدون شماره — شماره موجود نیست" in sent[-1][1]
 
     with db.connect() as conn:
@@ -269,7 +270,7 @@ def test_my_schedule_marks_past_today_and_days_off(live, monkeypatch):
 
 
 def test_today_and_tomorrow_use_current_calendar_dates_not_saved_week(live, monkeypatch):
-    from datetime import datetime
+    from datetime import datetime, timedelta
 
     monkeypatch.setattr(h_staff, "today_tomorrow", lambda: ("دوشنبه", "سه‌شنبه", 12 * 60))
     monkeypatch.setattr(h_staff, "now_tehran", lambda: datetime(2026, 10, 12, 12))
@@ -302,7 +303,7 @@ def test_role_menus_hide_management_options_from_admin(live):
         return {button["text"] for row in menu_for(staff).keyboard for button in row}
 
     assert BTN_STATS not in labels(admin) and BTN_TEAM not in labels(admin)
-    assert BTN_STATS in labels(supervisor) and BTN_TEAM in labels(supervisor)
+    assert BTN_STATS not in labels(supervisor) and BTN_TEAM in labels(supervisor)
     assert BTN_STATS in labels(manager) and BTN_TEAM not in labels(manager)
     assert BTN_STAFF_MANAGEMENT not in labels(admin) and BTN_STAFF_MANAGEMENT not in labels(supervisor)
     assert BTN_STAFF_MANAGEMENT in labels(manager)
@@ -321,6 +322,100 @@ def test_bot_manager_menu_and_permissions(live):
     app.bot.process_new_updates([callback(8, "stats:run:studios:week")])
     assert "استفاده از استودیوها" in to(live, 8)[-1]
     assert DOCS[-1][1]["visible_file_name"] == "classino-studios-week.xlsx"
+
+
+def test_company_manager_gets_only_company_tools_and_can_search_teacher(
+        live, tmp_path, monkeypatch):
+    import h_company_manager
+    from datetime import datetime, timedelta
+
+    import h_manage
+
+    entry = next(row for row in db.active_entries()
+                 if row["kind"] == "class" and row.get("teacher") and row.get("shift_date"))
+    teacher_name = "استاد آزمایش"
+    with db.connect() as conn:
+        conn.execute("UPDATE entries SET teacher=? WHERE id=?", (teacher_name, entry["id"]))
+    db.add_known("teacher", [teacher_name])
+    phone = "+98 (912) 000-0123 ext 4"
+    db.assign_teacher(teacher_name, "فرستنده", "test_teacher")
+    db.set_teacher_contact(teacher_name, phone, "فرستنده")
+
+    class_start = entry["start_min"]
+    now = datetime.fromisoformat(entry["shift_date"]) + timedelta(minutes=class_start + 1)
+    monkeypatch.setattr(h_company_manager, "now_tehran", lambda: now)
+
+    register_owner()
+    monkeypatch.setattr(h_manage, "STAFF_CSV_PATH", str(tmp_path / "staff.csv"))
+    say(1, BTN_STAFF_MANAGEMENT)
+    app.bot.process_new_updates([callback(1, "staffm:add")])
+    say(1, "مدیر مجموعه آزمایشی")
+    app.bot.process_new_updates([callback(1, "staffm:addrole:company_manager")])
+    manager_phone = "+98 (912) 000-0088"
+    say(1, manager_phone)
+    company_manager = db.get_staff_by_name("مدیر مجموعه آزمایشی")
+    assert company_manager["phone"] == manager_phone
+    assert company_manager["role"] == COMPANY_MANAGER
+    assert "مدیر مجموعه آزمایشی," + manager_phone + ",company_manager," in \
+        (tmp_path / "staff.csv").read_text(encoding="utf-8")
+    staff = db.find_staff_by_phone("09120000088")
+    assert staff and staff["role"] == COMPANY_MANAGER
+    db.bind_telegram(staff["id"], 88)
+
+    labels = [button["text"] for row in menu_for(db.get_staff_by_tid(88)).keyboard
+              for button in row]
+    assert labels == [BTN_COMPANY_TODAY, BTN_COMPANY_TEACHER, BTN_COMPANY_PHONES]
+    assert db.get_staff_by_name("مدیر مجموعه آزمایشی")["role"] == COMPANY_MANAGER
+    assert "مدیر" in app.staff_role_label(staff)
+    category_buttons = [button.callback_data
+                        for row in h_manage._staff_categories_keyboard().keyboard
+                        for button in row]
+    assert "staffm:category:company_manager" in category_buttons
+
+    schedule_start = len(live)
+    say(88, BTN_COMPANY_TODAY)
+    today_schedule = "\n".join(text for user_id, text in live[schedule_start:]
+                               if user_id == 88)
+    assert "📅" in today_schedule and "نیروهای پشتیبانی" in today_schedule
+    assert "📊 <b>خلاصه روز</b>" in today_schedule
+    assert "<b>استاد آزمایش</b>" in today_schedule
+    assert "🕒 <b>" in today_schedule and "| <b>" in today_schedule
+    assert "اپراتور: <b>" in today_schedule
+    assert "🛡 <b>ناظر</b>" in today_schedule and "🙋 <b>کمکی</b>" in today_schedule
+
+    say(88, BTN_COMPANY_TEACHER)
+    assert "فامیلی استاد" in to(live, 88)[-1]
+    say(88, "آزمایش")
+    teacher_report = to(live, 88)[-1]
+    assert teacher_name in teacher_report and phone in teacher_report
+    assert "برنامه‌ی امروز" in teacher_report and "برنامه‌ی این هفته" in teacher_report
+    assert "موقعیت فعلی" in teacher_report
+
+    say(88, BTN_COMPANY_PHONES)
+    app.bot.process_new_updates([callback(88, "company:phones:search")])
+    say(88, "آزمایش")
+    assert phone in to(live, 88)[-1]
+
+    say(88, "/team")
+    assert "این دستور برای نقش تو نیست" in to(live, 88)[-1]
+
+
+def test_company_daily_report_counts_and_bolds_all_class_operators():
+    import h_company_manager
+
+    entries = [
+        {"kind": "class", "teacher": "استاد اول", "start_min": 600,
+         "end_min": 660, "studio": "استودیو ۱", "person": "اپراتور بیرونی و مدیر"},
+        {"kind": "class", "teacher": "استاد دوم", "start_min": 660,
+         "end_min": 720, "studio": "استودیو ۲", "person": "اپراتور بیرونی"},
+    ]
+
+    report = "\n".join(h_company_manager._today_schedule_messages(
+        "دوشنبه", "2026-11-02", entries))
+
+    assert "۲ ادمین" in report
+    assert "اپراتور: <b>اپراتور بیرونی</b> و <b>مدیر</b>" in report
+    assert "اپراتور: <b>اپراتور بیرونی</b>" in report
 
 
 def test_bot_manager_can_switch_between_manager_and_regular_admin_modes(live):
@@ -430,7 +525,7 @@ def test_teacher_panel_merges_schedule_names_and_assignments(live, monkeypatch):
     say(OWNER_TELEGRAM_ID, "09120000126")
     assignment = db.get_teacher_assignment("بام رفیع")
     assert assignment and assignment["supervisor"] == "فرستنده"
-    assert assignment["phone"] == "9120000126"
+    assert assignment["phone"] == "09120000126"
 
 
 def test_owner_manages_studios_from_separate_home_panel(live):
@@ -502,7 +597,7 @@ def test_staff_management_add_edit_delete_updates_database_and_csv(live, tmp_pat
 
     created = db.get_staff_by_name("کارمند آزمایشی")
     assert created["role"] == "admin" and created["supervisor"] == "فرستنده"
-    assert "کارمند آزمایشی,9330001122,admin,فرستنده" in csv_path.read_text(encoding="utf-8")
+    assert "کارمند آزمایشی,09330001122,admin,فرستنده" in csv_path.read_text(encoding="utf-8")
 
     app.bot.process_new_updates([callback(1, "staffm:category:admin")])
     app.bot.process_new_updates([callback(1, f"staffm:person:{created['id']}")])
@@ -510,8 +605,8 @@ def test_staff_management_add_edit_delete_updates_database_and_csv(live, tmp_pat
     app.bot.process_new_updates([callback(1, f"staffm:field:{created['id']}:phone")])
     say(1, "09330001123")
     edited = db.get_staff_by_name("کارمند آزمایشی")
-    assert edited["phone"] == "9330001123"
-    assert "کارمند آزمایشی,9330001123,admin,فرستنده" in csv_path.read_text(encoding="utf-8")
+    assert edited["phone"] == "09330001123"
+    assert "کارمند آزمایشی,09330001123,admin,فرستنده" in csv_path.read_text(encoding="utf-8")
 
     app.bot.process_new_updates([callback(1, "staffm:category:admin")])
     app.bot.process_new_updates([callback(1, f"staffm:person:{created['id']}")])
@@ -536,7 +631,7 @@ def test_staff_management_adds_supervisor_without_asking_for_supervisor(live, tm
 
     supervisor = db.get_staff_by_name("سرپرست آزمایشی")
     assert supervisor["role"] == "supervisor" and supervisor["supervisor"] is None
-    assert "سرپرست آزمایشی,9330001124,supervisor," in csv_path.read_text(encoding="utf-8")
+    assert "سرپرست آزمایشی,09330001124,supervisor," in csv_path.read_text(encoding="utf-8")
 
 
 def test_stats_choice_limits_studio_lifetime_report(live):
@@ -554,18 +649,6 @@ def test_stats_choice_limits_studio_lifetime_report(live):
     assert DOCS[-1][1]["visible_file_name"] == "classino-studios-all-time.xlsx"
 
 
-def test_supervisor_stats_only_include_own_admins(live):
-    db.upsert_staff("وحید", "9120000003", "admin", "فرستنده")
-    say(2, "/stats")
-    app.bot.process_new_updates([callback(2, "stats:admins")])
-    assert "بازه‌ی گزارش را انتخاب کن" in to(live, 2)[-1]
-    app.bot.process_new_updates([callback(2, "stats:run:admins:month")])
-    report = to(live, 2)[-1]
-    assert "وحید" in report and "مهران" not in report
-    app.bot.process_new_updates([callback(2, "stats:studios")])
-    assert "فقط برای مسئول شیفت" in to(live, 2)[-1]
-
-
 def test_free_button_guides_day_and_time_and_lists_admins_and_helpers(live):
     db.upsert_staff("ادمین آزاد", "9120000999", "admin")
     say(1, BTN_FREE)
@@ -575,10 +658,10 @@ def test_free_button_guides_day_and_time_and_lists_admins_and_helpers(live):
     say(1, "15-16")
     report = to(live, 1)[-1]
     assert "ادمین‌های شیفت‌دار و آزاد" in report
-    assert "🟢 کمکی‌های این بازه" in report and "اشتری — 09120000006" in report
+    assert "🟢 کمکی‌های این بازه" in report and "اشتری — 9120000006" in report
     assert "🔴 ادمین‌های شیفت‌دار و مشغول" in report
     assert "⚪️ ادمین‌های بدون شیفت در این روز" in report
-    assert "ادمین آزاد — 09120000999" in report
+    assert "ادمین آزاد — 9120000999" in report
     assert "ناظر" not in report and "مهدیان" not in report
 
 
@@ -605,10 +688,10 @@ def test_free_report_categories_are_ordered_and_distinguish_shift_status(live, m
     ]
     assert [report.index(category) for category in categories] == sorted(
         report.index(category) for category in categories)
-    assert "آزاد در بازه — 09120000091" in report
-    assert "اشتری — 09120000006" in report
-    assert "مشغول در بازه — 09120000092" in report
-    assert "بدون شیفت امروز — 09120000093" in report
+    assert "آزاد در بازه — 9120000091" in report
+    assert "اشتری — 9120000006" in report
+    assert "مشغول در بازه — 9120000092" in report
+    assert "بدون شیفت امروز — 9120000093" in report
 
 
 def test_unverified_user_is_asked_for_contact_and_blocked(live):
@@ -644,9 +727,9 @@ def test_bot_manager_with_supervisor_is_listed_as_admin_and_keeps_manager_access
     db.bind_telegram(db.find_staff_by_phone("9129271665")["id"], 8)
 
     say(9, "/staff")
-    assert "آخوندی — ادمین — 09129271665 — سرپرست: سهیل" in to(live, 9)[-1]
+    assert "آخوندی — ادمین — 9129271665 — سرپرست: سهیل" in to(live, 9)[-1]
     say(9, "/free یکشنبه 12-13")
-    assert "آخوندی — 09129271665" in to(live, 9)[-1]
+    assert "آخوندی — 9129271665" in to(live, 9)[-1]
     assert "ادمین‌های بدون شیفت در این روز" in to(live, 9)[-1]
 
     sent = []
@@ -657,18 +740,6 @@ def test_bot_manager_with_supervisor_is_listed_as_admin_and_keeps_manager_access
     buttons = sent[-1][2]["reply_markup"].keyboard
     assert any("آخوندی" in button.text for row in buttons for button in row)
     assert db.get_staff_by_tid(8)["role"] == BOT_MANAGER
-
-
-def test_bot_managers_are_in_admin_statistics_scope(live):
-    db.upsert_staff("آخوندی", "9129271665", BOT_MANAGER, "فرستنده")
-    db.upsert_staff("مدیر ربات", "9120000088", BOT_MANAGER)
-    entries = [
-        {"person": "آخوندی"},
-        {"person": "وحید"},
-        {"person": "سهیل"},
-    ]
-    result = h_manage._admin_report_entries(db.get_staff_by_name("مدیر ربات"), entries)
-    assert [entry["person"] for entry in result] == ["آخوندی", "وحید"]
 
 
 def test_roles_are_enforced(live):
@@ -686,16 +757,6 @@ def test_helper_confirmation_buttons_are_on_separate_rows(live, monkeypatch):
     buttons = markup[-1].keyboard
     assert [[button.text for button in row] for row in buttons] == [
         ["بله، خبرش کن"], ["نه، شماره کافی بود"]]
-
-
-def test_stats_sends_text_and_excel(live):
-    say(1, "/stats")
-    assert "کدوم گزارش رو می‌خوای؟" in to(live, 1)[0]
-    app.bot.process_new_updates([callback(1, "stats:admins")])
-    assert "بازه‌ی گزارش را انتخاب کن" in to(live, 1)[-1]
-    app.bot.process_new_updates([callback(1, "stats:run:admins:month")])
-    assert "آمار ادمین‌ها" in to(live, 1)[-1]
-    assert DOCS and DOCS[0][1]["visible_file_name"] == "classino-admins-month.xlsx"
 
 
 def test_owner_can_correct_a_shift_date_and_only_owner_can_open_panel(live):
@@ -732,13 +793,13 @@ def test_owner_teacher_panel_adds_edits_and_deletes_assignment(live):
     assert "نام کاربری" not in to(live, OWNER_TELEGRAM_ID)[-1]
     say(OWNER_TELEGRAM_ID, "09120000124")
     assignment = db.get_teacher_assignment("استاد آزمایشی")
-    assert assignment["supervisor"] == "فرستنده" and assignment["phone"] == "9120000124"
-    assert db.find_staff_by_phone("9120000124")["role"] == TEACHER
+    assert assignment["supervisor"] == "فرستنده" and assignment["phone"] == "09120000124"
+    assert db.find_staff_by_phone("09120000124")["role"] == TEACHER
 
     assignment_id = db.list_teacher_assignments()[0]["id"]
     app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, f"teacherm:select:{assignment_id}")])
     assert "سرپرست: فرستنده" in to(live, OWNER_TELEGRAM_ID)[-1]
-    assert "شماره تماس: 9120000124" in to(live, OWNER_TELEGRAM_ID)[-1]
+    assert "شماره تماس: 09120000124" in to(live, OWNER_TELEGRAM_ID)[-1]
     assert "شناسه تلگرام" not in to(live, OWNER_TELEGRAM_ID)[-1]
     app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, f"teacherm:edit:{assignment_id}")])
     app.bot.process_new_updates(
@@ -746,7 +807,7 @@ def test_owner_teacher_panel_adds_edits_and_deletes_assignment(live):
     say(OWNER_TELEGRAM_ID, "استاد ویرایش‌شده")
     assignment = db.get_teacher_assignment("استاد ویرایش‌شده")
     assert assignment and assignment["teacher"] == "استاد ویرایش‌شده"
-    assert assignment["phone"] == "9120000124"
+    assert assignment["phone"] == "09120000124"
 
     assignment_id = db.list_teacher_assignments()[0]["id"]
     app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, f"teacherm:select:{assignment_id}")])
@@ -762,7 +823,7 @@ def test_owner_teacher_panel_adds_edits_and_deletes_assignment(live):
     app.bot.process_new_updates(
         [callback(OWNER_TELEGRAM_ID, f"teacherm:field:{assignment_id}:phone")])
     say(OWNER_TELEGRAM_ID, "09120000555")
-    assert db.get_teacher_assignment("استاد ویرایش‌شده")["phone"] == "9120000555"
+    assert db.get_teacher_assignment("استاد ویرایش‌شده")["phone"] == "09120000555"
 
     app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, f"teacherm:select:{assignment_id}")])
     app.bot.process_new_updates([callback(OWNER_TELEGRAM_ID, f"teacherm:delete:{assignment_id}")])
@@ -779,10 +840,10 @@ def test_teacher_panel_manages_phone_group_and_online_mode(live):
         [callback(OWNER_TELEGRAM_ID, f"teacherm:field:{assignment_id}:phone")])
     say(OWNER_TELEGRAM_ID, "09120000123")
 
-    assert db.get_teacher_assignment("استاد پنل")["phone"] == "9120000123"
+    assert db.get_teacher_assignment("استاد پنل")["phone"] == "09120000123"
     assert db.get_staff_by_name("استاد پنل")["role"] == TEACHER
-    assert db.find_staff_by_phone("9120000123")["supervisor"] == "فرستنده"
-    assert "9120000123" in to(live, 2)[-1]
+    assert db.find_staff_by_phone("09120000123")["supervisor"] == "فرستنده"
+    assert "09120000123" in to(live, 2)[-1]
 
     app.bot.process_new_updates(
         [callback(OWNER_TELEGRAM_ID, f"teacherm:grouplink:{assignment_id}")])
@@ -820,12 +881,13 @@ def test_problem_button_chain_posts_to_group_and_dms_helpers(live):
     app.bot.process_new_updates([callback(3, "op:nh:1")])
     group = to(live, -100)
     assert len(group) == 1
-    assert '<a href="tg://user?id=3">وحید</a> در طوسی2 مشکل' in group[0]
-    assert "ناظر شیفت:" in group[0] and "کمکی شیفت:" in group[0]
+    assert '<a href="tg://user?id=3">وحید</a> در طوسی2' in group[0]
+    assert "مشکل 🔊 صدا دارد" in group[0]
+    assert "👁 ناظر:" in group[0] and "🧑‍🔧 کمکی:" in group[0]
     assert '<a href="tg://user?id=6">اشتری</a>' in group[0]
     response = to(live, 3)[-1]
-    assert '<a href="tg://user?id=5">مهدیان</a> (09120000005)' in response
-    assert '<a href="tg://user?id=6">اشتری</a> (09120000006)' in response
+    assert '<a href="tg://user?id=5">مهدیان</a> (9120000005)' in response
+    assert '<a href="tg://user?id=6">اشتری</a> (9120000006)' in response
     assert '<a href="tg://user?id=5">مهدیان</a>' in to(live, 6)[0]
     assert to(live, 5) and to(live, 6)                     # چون کمک خواسته، ناظر/کمکی مستقیم هم خبر شدند
 
@@ -836,18 +898,18 @@ def test_problem_number_only_does_not_ask_for_studio_again(live):
     app.bot.process_new_updates([callback(3, "op:nh:0")])
 
     replies = to(live, 3)
-    assert '<a href="tg://user?id=6">اشتری</a> (09120000006)' in replies[-1]
+    assert '<a href="tg://user?id=6">اشتری</a> (9120000006)' in replies[-1]
     assert not any("کدوم استودیویی؟" in text for text in replies)
     assert h_ops.S.get(3) is None
 
 
 def test_helper_button_confirms_identity_then_notifies(live):
     say(4, "/helper")
-    assert '<a href="tg://user?id=6">اشتری</a> (09120000006)' in to(live, 4)[0]
+    assert '<a href="tg://user?id=6">اشتری</a> (9120000006)' in to(live, 4)[0]
     app.bot.process_new_updates([callback(4, "op:hy")])    # مهران ۱۷:۰۰: منفی1
     assert "کدوم استودیویی؟" in to(live, 4)[1]
     app.bot.process_new_updates([callback(4, "op:st:0")])
-    assert "منفی1" in to(live, 6)[0] and "09120000004" in to(live, 6)[0]   # اشتری شماره‌ی مهران را گرفت
+    assert "منفی1" in to(live, 6)[0] and "9120000004" in to(live, 6)[0]   # اشتری شماره‌ی مهران را گرفت
     assert '<a href="tg://user?id=4">مهران</a>' in to(live, -100)[-1]
     assert "مستقیم در بات" in to(live, 4)[-1]
 
@@ -861,14 +923,16 @@ def test_supervisor_links_teacher_group_and_notifies(live, monkeypatch):
     db.assign_teacher("مرادی", "فرستنده", "moradi_teacher")
     say(2, "/linkteacher فکری", chat_id=-500, chat_type="supergroup")
     assert "وصل شد" in to(live, -500)[0]
+    say(2, "/registerteacher", chat_id=-500, chat_type="supergroup", reply_to_uid=404)
     say(2, "/linkteacher مرادی", chat_id=-501, chat_type="supergroup")
+    say(2, "/registerteacher", chat_id=-501, chat_type="supergroup", reply_to_uid=405)
     say(2, "/notify_teachers یکشنبه")
     preview = to(live, 2)[-1]
     assert "به 2 گروه" in preview and "بدون تخصیص" not in preview
     assert "گروه" not in preview or "حسینی" not in preview
     app.bot.process_new_updates([callback(2, "nt:go")])
     teacher_msg = to(live, -500)[-1]
-    assert "استاد فکری عزیز، @fikri_teacher" in teacher_msg
+    assert '<a href="tg://user?id=404">فکری عزیز</a>' in teacher_msg
     assert "بزرگ" in teacher_msg and "یکشنبه 26 مهر" in teacher_msg
     assert "ارسال شد" in to(live, 2)[-1]
 
